@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "B站视频下载器 · 本地助手",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "在B站视频页选择画质和分P，交给本机下载器生成MP4，或用Edge直接下载音视频。",
   "permissions": ["activeTab", "tabs", "scripting", "cookies", "downloads", "storage", "declarativeNetRequestWithHostAccess"],
   "host_permissions": [

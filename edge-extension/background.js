@@ -1,11 +1,17 @@
 import { normalizeInput, safeName, chooseVideo, qualityList, mediaUrl } from "./core.js";
 
 const LOCAL = "http://127.0.0.1:17890";
-const defaults = { token: "", directory: "", mode: "desktop", askSave: true, syncLogin: true };
+const defaults = { token: "", directory: "", mode: "desktop", askSave: true, syncLogin: true, extensionEnabled: true, floatingEnabled: true };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function settings() {
   return chrome.storage.local.get(defaults);
+}
+
+async function ensureEnabled(action) {
+  const config = await settings();
+  if (config.extensionEnabled === false) throw new Error("插件当前已停用，请在扩展设置中重新启用。");
+  if (action === "toggleFloating" && config.floatingEnabled === false) throw new Error("视频页悬浮窗已停用，请在扩展设置中重新启用。");
 }
 
 async function localRequest(path, body, timeout = 12000) {
@@ -198,6 +204,7 @@ async function favoriteItems(folderId) {
 }
 
 async function handle(request, sender) {
+  await ensureEnabled(request.action);
   // 网页内容脚本只能打开扩展界面，不能读取登录信息或添加后台任务。
   if (sender.tab && !sender.url?.startsWith(chrome.runtime.getURL("")) && request.action !== "open") {
     throw new Error("请使用扩展窗口操作。");

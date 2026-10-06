@@ -1,11 +1,23 @@
 const $ = id => document.getElementById(id);
 async function load() {
-  const config = await chrome.storage.local.get({ token: "", directory: "", askSave: true, syncLogin: true });
+  const config = await chrome.storage.local.get({ token: "", directory: "", askSave: true, syncLogin: true, extensionEnabled: true, floatingEnabled: true });
   $("token").value = config.token;
   $("ask-save").checked = config.askSave;
   $("sync-login").checked = config.syncLogin;
+  $("extension-enabled").checked = config.extensionEnabled;
+  $("floating-enabled").checked = config.floatingEnabled;
   $("directory").textContent = "保存目录：" + (config.directory || "跟随桌面程序");
 }
+$("extension-enabled").addEventListener("change", async () => {
+  await chrome.storage.local.set({ extensionEnabled: $("extension-enabled").checked });
+  $("status").textContent = $("extension-enabled").checked ? "插件已启用。" : "插件已停用；需要下载时可重新打开此开关。";
+  $("status").className = "";
+});
+$("floating-enabled").addEventListener("change", async () => {
+  await chrome.storage.local.set({ floatingEnabled: $("floating-enabled").checked });
+  $("status").textContent = $("floating-enabled").checked ? "视频页悬浮窗已启用。" : "视频页悬浮窗已停用。";
+  $("status").className = "";
+});
 $("save").addEventListener("click", async () => {
   await chrome.storage.local.set({ token: $("token").value.trim(), askSave: $("ask-save").checked });
   $("save").disabled = true;

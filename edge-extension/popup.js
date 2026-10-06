@@ -3,10 +3,17 @@ let favoriteItems = [];
 let favoriteAdvancedLoaded = false;
 let favoriteSelection = new Set();
 const $ = id => document.getElementById(id);
-const defaults = { token: "", directory: "", mode: "desktop", askSave: true };
+const defaults = { token: "", directory: "", mode: "desktop", askSave: true, extensionEnabled: true, floatingEnabled: true };
 const floating = new URLSearchParams(location.search).get("floating") === "1";
 if (floating) { document.body.classList.add("floating"); $("floating").hidden = true; }
 const status = (text, error = false) => { $("status").textContent = text; $("status").className = error ? "error" : ""; };
+function applyFeatureState(config) {
+  const enabled = config.extensionEnabled !== false;
+  const floatingEnabled = config.floatingEnabled !== false;
+  $("floating").disabled = !enabled || !floatingEnabled;
+  document.body.classList.toggle("extension-disabled", !enabled);
+  if (!enabled) status("插件当前已停用，请打开设置重新启用。", true);
+}
 const duration = seconds => Math.floor((seconds || 0) / 60) + ":" + String((seconds || 0) % 60).padStart(2, "0");
 
 async function send(message) {
@@ -154,13 +161,16 @@ $("favorite-download").addEventListener("click", () => busy("favorite-download",
 }));
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.directory) $("directory").textContent = "保存目录：" + (changes.directory.newValue || "桌面程序的默认目录");
+  if (area === "local" && (changes.extensionEnabled || changes.floatingEnabled)) chrome.storage.local.get(defaults).then(applyFeatureState);
 });
 
 (async () => {
   const config = await chrome.storage.local.get(defaults);
+  applyFeatureState(config);
   document.querySelector('input[name="mode"][value="' + (config.mode === "browser" ? "browser" : "desktop") + '"]').checked = true;
   $("directory").textContent = "保存目录：" + (config.directory || "桌面程序的默认目录");
   updateMode();
+  if (config.extensionEnabled === false) return;
   const preset = new URLSearchParams(location.search).get("video");
   if (preset) { $("url").value = preset; await inspect(); return; }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

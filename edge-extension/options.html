@@ -3,6 +3,12 @@
 <body>
 <header><div><h1>连接本地下载器</h1><p>一次设置，之后直接从B站页面下载。</p></div></header>
 <main><section class="card">
+<h2>功能开关</h2>
+<label class="switch"><input id="extension-enabled" type="checkbox" checked><span></span><b>启用插件</b></label>
+<p class="hint">关闭后，视频页按钮、悬浮窗和下载操作都会暂停；可从本设置页重新启用。</p>
+<label class="switch"><input id="floating-enabled" type="checkbox" checked><span></span><b>启用视频页悬浮窗</b></label>
+<p class="hint">关闭后只隐藏视频页悬浮按钮和页面下载按钮，扩展弹窗及收藏夹功能仍可使用。</p>
+</section><section class="card">
 <h2>桌面连接码</h2>
 <p class="hint">打开桌面程序 → 设置与连接 → 复制连接码，粘贴到这里。</p>
 <input id="token" type="password" placeholder="粘贴连接码" autocomplete="off">

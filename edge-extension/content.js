@@ -51,6 +51,7 @@
   shadow.append(style, launcher, panel);
   document.documentElement.append(host);
   let frameVideo = "", currentVideo = "", dragMoved = false, toolbarHost, frameTimeout;
+  let extensionEnabled = true, floatingEnabled = true;
 
   function videoURL() {
     const match = location.href.match(/BV[0-9A-Za-z]{10}/i);
@@ -75,7 +76,7 @@
     }
   }
   function openPanel() {
-    if (!videoURL()) return;
+    if (!extensionEnabled || !floatingEnabled || !videoURL()) return;
     panel.hidden = false;
     launcher.hidden = true;
     loadVideo();
@@ -156,6 +157,10 @@
 
   function refreshPage() {
     if (!host.isConnected || !chrome.runtime.id) { cleanup(); return; }
+    if (!extensionEnabled || !floatingEnabled) {
+      panel.hidden = true; launcher.hidden = true; toolbarHost?.remove(); toolbarHost = null; currentVideo = ""; frameVideo = "";
+      return;
+    }
     const video = videoURL();
     if (video !== currentVideo) {
       currentVideo = video;
@@ -193,12 +198,27 @@
     if (request.action === "toggleFloating") { panel.hidden ? openPanel() : collapse(); respond({ ok: true }); }
   };
   chrome.runtime.onMessage.addListener(receive);
+  const storageChanged = (changes, area) => {
+    if (area !== "local" || (!changes.extensionEnabled && !changes.floatingEnabled)) return;
+    chrome.storage.local.get({ extensionEnabled: true, floatingEnabled: true }).then(config => {
+      extensionEnabled = config.extensionEnabled !== false;
+      floatingEnabled = config.floatingEnabled !== false;
+      refreshPage();
+    }).catch(() => {});
+  };
+  chrome.storage.onChanged.addListener(storageChanged);
+  chrome.storage.local.get({ extensionEnabled: true, floatingEnabled: true }).then(config => {
+    extensionEnabled = config.extensionEnabled !== false;
+    floatingEnabled = config.floatingEnabled !== false;
+    refreshPage();
+  }).catch(() => {});
   function cleanup() {
     observer.disconnect();
     clearInterval(interval); clearTimeout(scheduled); clearTimeout(frameTimeout);
     window.removeEventListener("resize", resized);
     window.removeEventListener("message", frameReady);
     try { chrome.runtime.onMessage.removeListener(receive); } catch {}
+    try { chrome.storage.onChanged.removeListener(storageChanged); } catch {}
     toolbarHost?.remove(); host.remove();
   }
   globalThis.__biliLocalFloatingCleanup = cleanup;
