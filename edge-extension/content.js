@@ -53,9 +53,10 @@
   let frameVideo = "", currentVideo = "", dragMoved = false, toolbarHost, frameTimeout;
 
   function videoURL() {
-    const match = location.pathname.match(/^\/video\/(BV[0-9A-Za-z]{10})/i);
+    const match = location.href.match(/BV[0-9A-Za-z]{10}/i);
     if (!match) return "";
-    const page = Number(new URLSearchParams(location.search).get("p")) || 1;
+    const params = new URLSearchParams(location.search);
+    const page = Number(params.get("p") || params.get("page")) || 1;
     return "https://www.bilibili.com/video/" + match[1] + "/?p=" + Math.max(1, page);
   }
   function loadVideo() {

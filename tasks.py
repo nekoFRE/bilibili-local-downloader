@@ -312,10 +312,10 @@ class Bridge:
 
             def do_GET(self):
                 if self.path == "/health" and self.valid_host() and self.allowed_origin():
-                    self.reply(200, {"app": "bili-local-downloader", "version": "1.2.0"})
+                    self.reply(200, {"app": "bili-local-downloader", "version": "1.2.2"})
                 elif self.authenticate():
                     if self.path == "/status":
-                        self.reply(200, {"version": "1.2.0", "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
+                        self.reply(200, {"version": "1.2.2", "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
                     elif urlparse(self.path).path == "/directory-result":
                         request_id = parse_qs(urlparse(self.path).query).get("id", [""])[0]
                         request = bridge.directory_results.get(request_id)

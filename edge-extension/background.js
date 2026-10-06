@@ -93,12 +93,23 @@ async function toggleFloating(request) {
   const activeTabs = await chrome.tabs.query({ active: true });
   const focused = await chrome.windows.getLastFocused();
   const active = activeTabs.find(tab => tab.windowId === focused.id) || activeTabs[0];
-  const isVideo = tab => /^https:\/\/(?:www\.)?bilibili\.com\/video\//i.test(tab?.url || "");
+  const videoInfo = tab => {
+    const url = String(tab?.url || "");
+    if (!/^https:\/\/(?:www\.)?bilibili\.com\//i.test(url)) return null;
+    try {
+      const parsed = new URL(url);
+      const hasVideoPath = /\/video\/BV[0-9A-Za-z]{10}/i.test(parsed.pathname);
+      const hasListVideo = /\/(?:list|medialist\/play)\//i.test(parsed.pathname) && /[?&]bvid=BV[0-9A-Za-z]{10}(?:[&#]|$)/i.test(parsed.search);
+      if (!hasVideoPath && !hasListVideo) return null;
+      return normalizeInput(url);
+    } catch { return null; }
+  };
+  const isVideo = tab => Boolean(videoInfo(tab));
   const candidates = (await chrome.tabs.query({})).filter(isVideo);
   let preferred;
   try { preferred = normalizeInput(request.url || "").bvid; } catch {}
   const matching = candidates.filter(candidate => {
-    try { return normalizeInput(candidate.url).bvid === preferred; } catch { return false; }
+    try { return videoInfo(candidate).bvid === preferred; } catch { return false; }
   });
   const tab = isVideo(active) ? active : (matching.length ? matching : candidates).sort((a, b) => (b.lastAccessed || b.id) - (a.lastAccessed || a.id))[0];
   if (!tab) throw new Error("没有找到已打开的B站视频标签页。请先在这个Edge配置中打开视频页。");

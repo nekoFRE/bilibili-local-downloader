@@ -164,6 +164,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const preset = new URLSearchParams(location.search).get("video");
   if (preset) { $("url").value = preset; await inspect(); return; }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.url && /https:\/\/www\.bilibili\.com\/video\//.test(tab.url)) { $("url").value = tab.url; await inspect(); }
+  if (tab?.url && /https:\/\/(?:www\.)?bilibili\.com\/(?:video\/|(?:list|medialist\/play)\/).*BV[0-9A-Za-z]{10}/i.test(tab.url)) { $("url").value = tab.url; await inspect(); }
 })().catch(error => status(error.message || "扩展初始化失败，请重新加载扩展后重试。", true));
 if (floating) window.parent.postMessage({ type: "biliLocalFrameReady" }, "https://www.bilibili.com");
