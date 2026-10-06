@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>B站视频下载器</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header><div><h1>B站视频下载器</h1><p>从浏览器，保存到本地。</p></div><button id="options" class="light">设置</button></header>
+<main>
+  <section class="card">
+    <div class="row"><input id="url" placeholder="视频链接、BV号或分享文字"><button id="inspect" class="primary">解析</button></div>
+    <div class="preview"><img id="cover" alt="视频封面" hidden><div><h2 id="title">选择你想保存的视频</h2><p id="info">支持画质选择和多P下载</p></div></div>
+    <div class="row"><label for="quality">画质</label><select id="quality"><option value="0">自动 · 最高可用</option></select><label class="check"><input id="all-pages" type="checkbox">全选分P</label></div>
+    <div id="pages"></div>
+    <div class="row modes"><label class="check"><input name="mode" value="desktop" type="radio" checked>桌面合并MP4</label><label class="check"><input name="mode" value="browser" type="radio">浏览器直接下载</label></div>
+    <p id="mode-note" class="hint">打开桌面程序，扩展会使用Edge中的B站登录状态。</p>
+    <p id="directory" class="path">保存目录：桌面程序的默认目录</p>
+    <div class="row"><button id="choose-dir">选择保存目录</button><button id="download" class="primary" disabled>开始下载</button></div>
+  </section>
+  <section class="card">
+    <div class="row"><h2>收藏夹批量下载</h2><button id="folders" class="light">加载</button></div>
+    <div class="row"><select id="folder"><option value="">选择收藏夹</option></select><button id="favorite-download">加入本地队列</button></div>
+    <label class="check"><input id="favorite-all-pages" type="checkbox" checked>下载全部分P</label>
+    <p class="hint">批量任务由桌面程序下载、合并，失效视频不会影响其他任务。</p>
+  </section>
+  <p id="status" role="status">准备好了。</p>
+  <footer><button id="refresh" class="light">检查本机连接</button><button id="expand" class="light">打开独立页面</button></footer>
+</main>
+<script src="popup.js"></script>
+</body></html>

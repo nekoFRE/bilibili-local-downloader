@@ -1,0 +1,15 @@
+<!doctype html><html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>连接本地下载器</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<header><div><h1>连接本地下载器</h1><p>一次设置，之后直接从B站页面下载。</p></div></header>
+<main><section class="card">
+<h2>桌面连接码</h2>
+<p class="hint">打开桌面程序 → 设置与连接 → 复制连接码，粘贴到这里。</p>
+<input id="token" type="password" placeholder="粘贴连接码" autocomplete="off">
+<div class="row"><button id="save" class="primary">保存并检查连接</button><button id="reset-dir">跟随桌面默认目录</button></div>
+<p id="directory" class="path"></p>
+<label class="check"><input id="ask-save" type="checkbox">浏览器直接下载时，每次询问文件保存位置</label>
+<p class="hint">桌面模式支持任意目录并自动合并MP4。浏览器模式使用Edge下载管理器，DASH音视频分开保存。</p>
+<p class="hint">连接只使用127.0.0.1。Cookie随下载任务传给本机，不保存在扩展设置里。</p>
+</section><p id="status" role="status">准备好了。</p></main>
+<script src="options.js"></script></body></html>
