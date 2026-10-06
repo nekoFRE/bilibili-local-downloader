@@ -248,8 +248,9 @@ async function handle(request, sender) {
     case "favoriteItems": return favoriteItems(request.folderId);
     case "favoriteDownload": {
       const allItems = await favoriteItems(request.folderId);
+      const hasSelection = Array.isArray(request.selectedBvids);
       const selected = new Set((request.selectedBvids || []).map(String));
-      const items = selected.size ? allItems.filter(item => selected.has(item.bvid)) : allItems;
+      const items = hasSelection ? allItems.filter(item => selected.has(item.bvid)) : allItems;
       if (!items.length) throw new Error("收藏夹为空。");
       const config = await settings();
       const result = await localRequest("/tasks", {
