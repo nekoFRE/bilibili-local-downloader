@@ -111,6 +111,7 @@ class TaskManager:
         self.tasks = []
         self.history_path = settings.data_dir / "tasks.json"
         self.directory_requests = queue.Queue()
+        self.window_requests = queue.Queue(maxsize=1)
         if self.history_path.exists():
             try:
                 self.tasks = json.loads(self.history_path.read_text(encoding="utf-8"))
@@ -287,7 +288,7 @@ class Bridge:
 
             def do_GET(self):
                 if self.path == "/health" and self.valid_host() and self.allowed_origin():
-                    self.reply(200, {"app": "bili-local-downloader", "version": "1.0.0"})
+                    self.reply(200, {"app": "bili-local-downloader", "version": "1.1.0"})
                 elif self.authenticate():
                     if self.path == "/status":
                         self.reply(200, {"directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
@@ -319,6 +320,12 @@ class Bridge:
                             raise ValueError("登录数据格式不正确")
                         ids = bridge.manager.add(body.get("tasks") or [], cookies)
                         self.reply(200, {"added": len(ids), "ids": ids})
+                    elif self.path == "/show-window":
+                        try:
+                            bridge.manager.window_requests.put_nowait(True)
+                        except queue.Full:
+                            pass
+                        self.reply(200, {"shown": True})
                     elif self.path == "/choose-directory":
                         request = {"event": threading.Event(), "directory": None}
                         request_id = uuid.uuid4().hex

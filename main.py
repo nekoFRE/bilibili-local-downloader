@@ -3,12 +3,14 @@ import sys
 import traceback
 from pathlib import Path
 
+import requests
+
 from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from downloader import APP_ROOT
-from tasks import Bridge, Settings, TaskManager
+from tasks import Bridge, PORT, Settings, TaskManager
 from ui import MainWindow
 
 
@@ -22,7 +24,14 @@ def main():
     lock = QLockFile(str(settings.data_dir / "app.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(100):
-        QMessageBox.information(None, "程序已在运行", "B站视频下载器已经打开，请使用现有窗口。")
+        try:
+            session = requests.Session()
+            session.trust_env = False
+            with session:
+                response = session.post(f"http://127.0.0.1:{PORT}/show-window", json={}, headers={"X-Bili-Token": settings.values["token"]}, timeout=2)
+                response.raise_for_status()
+        except requests.RequestException:
+            QMessageBox.information(None, "程序已在运行", "B站视频下载器已经打开，请点击任务栏右下角的托盘图标恢复窗口。")
         return 0
     manager = TaskManager(settings)
     bridge = Bridge(manager)

@@ -1,6 +1,8 @@
 let meta = null;
 const $ = id => document.getElementById(id);
 const defaults = { token: "", directory: "", mode: "desktop", askSave: true };
+const floating = new URLSearchParams(location.search).get("floating") === "1";
+if (floating) { document.body.classList.add("floating"); $("floating").hidden = true; }
 const status = (text, error = false) => { $("status").textContent = text; $("status").className = error ? "error" : ""; };
 const duration = seconds => Math.floor((seconds || 0) / 60) + ":" + String((seconds || 0) % 60).padStart(2, "0");
 
@@ -77,6 +79,13 @@ $("refresh").addEventListener("click", () => busy("refresh", async () => {
   status("本机已连接 · " + active + " 个进行中的任务");
 }));
 $("options").addEventListener("click", () => chrome.runtime.openOptionsPage());
+$("floating").addEventListener("click", () => busy("floating", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.url || !/^https:\/\/www\.bilibili\.com\/video\//.test(tab.url)) throw new Error("先打开B站视频页，再使用悬浮面板。");
+  try { await chrome.tabs.sendMessage(tab.id, { action: "toggleFloating" }); }
+  catch { throw new Error("请刷新B站视频页后重试。"); }
+  window.close();
+}));
 $("expand").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("popup.html") + ($("url").value ? "?video=" + encodeURIComponent($("url").value) : "") }));
 $("folders").addEventListener("click", () => busy("folders", async () => {
   status("正在加载收藏夹…");

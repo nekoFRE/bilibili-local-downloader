@@ -6,12 +6,12 @@ import threading
 from pathlib import Path
 
 import requests
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot, QUrl
+from PySide6.QtCore import QEvent, QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSystemTrayIcon,
     QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -81,6 +81,8 @@ class MainWindow(QMainWindow):
         self.jobs, self.job_id = {}, 0
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(3)
+        self.exiting = False
+        self.tray_notice_shown = False
         self.setWindowTitle("B站视频下载器")
         self.resize(1120, 840)
         self.setMinimumSize(900, 650)
@@ -99,6 +101,8 @@ class MainWindow(QMainWindow):
         head.addStretch()
         self.account_label = label("游客模式", "badge")
         head.addWidget(self.account_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.background_button = button("后台运行", self.hide_to_tray)
+        head.addWidget(self.background_button)
         outer.addLayout(head)
         directory_card, directory_layout = card()
         directory_layout.setContentsMargins(16, 12, 16, 12)
@@ -120,6 +124,7 @@ class MainWindow(QMainWindow):
         self.notice = label("准备好了，粘贴一个视频链接开始。", "muted")
         outer.addWidget(self.notice)
         self.setCentralWidget(central)
+        self.setup_tray()
         style_path = RESOURCE_ROOT / "assets" / "style.qss"
         if style_path.exists():
             style = style_path.read_text(encoding="utf-8").replace("url(assets/check.svg)", f'url("{(RESOURCE_ROOT / "assets" / "check.svg").as_posix()}")')
@@ -296,6 +301,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(bridge_card)
         tools_card, tools = card()
         tools.addWidget(label("运行状态", "sectionTitle"))
+        self.minimize_tray = QCheckBox("最小化时收起到系统托盘")
+        self.minimize_tray.setChecked(self.settings.values.get("minimize_to_tray", True))
+        self.minimize_tray.toggled.connect(lambda value: self.settings.set("minimize_to_tray", value))
+        tools.addWidget(self.minimize_tray)
+        self.close_tray = QCheckBox("关闭窗口时继续在后台下载")
+        self.close_tray.setChecked(self.settings.values.get("close_to_tray", True))
+        self.close_tray.toggled.connect(lambda value: self.settings.set("close_to_tray", value))
+        tools.addWidget(self.close_tray)
+        tools.addWidget(label("点击任务栏右下角的托盘图标恢复窗口。完全退出请使用托盘菜单或下方按钮。", "muted"))
+        tools.addWidget(button("退出程序", self.request_exit))
         tools.addWidget(label("FFmpeg 已就绪，可以自动合并MP4。" if ffmpeg_path() else "未找到FFmpeg，请把ffmpeg.exe放入tools目录。", "muted"))
         self.merge_button = button("合并已有音视频文件", self.merge_existing)
         tools.addWidget(self.merge_button)
@@ -425,6 +440,8 @@ class MainWindow(QMainWindow):
         self.manager.paused = not self.manager.paused
         self.pause_button.setText("继续队列" if self.manager.paused else "暂停队列")
         self.manager.wakeup.set()
+        if self.tray:
+            self.tray_pause.setText("继续下载队列" if self.manager.paused else "暂停下载队列")
 
     def clear_finished(self):
         self.manager.clear_finished()
@@ -432,9 +449,18 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def refresh(self, *_):
+        if not self.manager.window_requests.empty():
+            while not self.manager.window_requests.empty():
+                try:
+                    self.manager.window_requests.get_nowait()
+                except queue.Empty:
+                    break
+            self.restore_window()
         snapshots = self.manager.snapshot()
         counts = sum(t["status"] not in FINISHED for t in snapshots)
         self.queue_count.setText(f'{counts} 个进行中 · {len(snapshots)} 个任务')
+        if self.tray:
+            self.tray.setToolTip(f"B站视频下载器 · {counts} 个任务" + (" · 队列已暂停" if self.manager.paused else ""))
         mode = self.filter.currentText()
         rows = [t for t in snapshots if mode == "全部" or (mode == "进行中" and t["status"] not in FINISHED) or (mode == "已完成" and t["status"] in {"已完成", "已跳过"}) or (mode == "失败 / 中断" and t["status"] in {"失败", "已中断", "已取消"})]
         self.visible_tasks = rows
@@ -621,13 +647,67 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self.notice.setText(str(exc))
 
+    def setup_tray(self):
+        self.tray = None
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.background_button.setEnabled(False)
+            self.background_button.setToolTip("当前系统没有可用的托盘，窗口仍可正常最小化。")
+            return
+        self.tray = QSystemTrayIcon(self.windowIcon(), self)
+        menu = QMenu(self)
+        menu.addAction("显示主窗口", self.restore_window)
+        self.tray_pause = menu.addAction("暂停下载队列", self.toggle_pause)
+        menu.addAction("打开下载目录", lambda: self.open_path(self.directory.text(), folder=True))
+        menu.addSeparator()
+        menu.addAction("退出程序", self.request_exit)
+        self.tray.setContextMenu(menu)
+        self.tray.setToolTip("B站视频下载器")
+        self.tray.activated.connect(self.tray_activated)
+        self.tray.show()
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+
+    def tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.restore_window()
+
+    def restore_window(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def hide_to_tray(self):
+        if self.exiting or not self.tray:
+            return
+        self.hide()
+        if not self.tray_notice_shown:
+            self.tray_notice_shown = True
+            self.tray.showMessage("下载器正在后台运行", "下载会继续。点击托盘图标恢复窗口，右键菜单可完全退出。", QSystemTrayIcon.MessageIcon.Information, 3000)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange and self.isMinimized() and self.settings.values.get("minimize_to_tray", True):
+            QTimer.singleShot(0, self.hide_to_tray)
+
+    def request_exit(self):
+        self.exiting = True
+        if not self.close():
+            self.exiting = False
+
     def closeEvent(self, event):
+        if not self.exiting and self.tray and self.settings.values.get("close_to_tray", True):
+            event.ignore()
+            self.hide_to_tray()
+            return
         if any(t["status"] not in FINISHED for t in self.manager.snapshot()):
             result = QMessageBox.question(self, "退出下载器", "还有未完成的任务。退出会停止当前下载，重新打开后可以重试。\n\n确定退出吗？")
             if result != QMessageBox.StandardButton.Yes:
                 event.ignore()
+                self.exiting = False
                 return
         self.timer.stop()
         self.manager.shutdown()
         self.bridge.shutdown()
+        if self.tray:
+            self.tray.hide()
         event.accept()
+        QApplication.instance().quit()
