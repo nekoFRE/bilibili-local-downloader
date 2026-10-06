@@ -235,6 +235,7 @@ class MainWindow(QMainWindow):
         self.favorite_search.setPlaceholderText("按标题或UP主筛选")
         self.favorite_search.textChanged.connect(self.filter_favorites)
         content.addWidget(self.favorite_search)
+        content.addWidget(label("高级选项：按标题或UP主筛选后，可逐条勾选要下载的视频。", "muted"))
         self.favorite_list = QListWidget()
         content.addWidget(self.favorite_list, 1)
         row = QHBoxLayout()

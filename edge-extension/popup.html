@@ -15,9 +15,14 @@
     <div class="row"><button id="choose-dir">选择保存目录</button><button id="download" class="primary" disabled>开始下载</button></div>
   </section>
   <section class="card">
-    <div class="row"><h2>收藏夹批量下载</h2><button id="folders" class="light">加载</button></div>
+    <div class="row"><h2>收藏夹批量下载</h2><button id="folders" class="light">加载</button><button id="favorite-advanced" class="light">高级选项</button></div>
     <div class="row"><select id="folder"><option value="">选择收藏夹</option></select><button id="favorite-download">加入本地队列</button></div>
     <label class="check"><input id="favorite-all-pages" type="checkbox" checked>下载全部分P</label>
+    <div id="favorite-advanced-panel" hidden>
+      <div class="row"><input id="favorite-search" placeholder="筛选标题或BV号"><button id="favorite-all">全选</button><button id="favorite-none">全不选</button></div>
+      <p id="favorite-count" class="hint">先选择收藏夹并点击“加载视频”。</p>
+      <div id="favorite-list"></div>
+    </div>
     <p class="hint">批量任务由桌面程序下载、合并，失效视频不会影响其他任务。</p>
   </section>
   <p id="status" role="status">准备好了。</p>

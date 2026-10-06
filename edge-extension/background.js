@@ -90,19 +90,17 @@ async function syncLogin() {
 }
 
 async function toggleFloating(request) {
-  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const isVideo = tab => /^https:\/\/www\.bilibili\.com\/video\//.test(tab?.url || "");
-  let tab = isVideo(active) ? active : null;
-  if (!tab) {
-    let candidates = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*", currentWindow: true });
-    if (!candidates.length) candidates = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*" });
-    let preferred;
-    try { preferred = normalizeInput(request.url || "").bvid; } catch {}
-    const matching = candidates.filter(candidate => {
-      try { return normalizeInput(candidate.url).bvid === preferred; } catch { return false; }
-    });
-    tab = (matching.length ? matching : candidates).sort((a, b) => (b.lastAccessed || b.id) - (a.lastAccessed || a.id))[0];
-  }
+  const activeTabs = await chrome.tabs.query({ active: true });
+  const focused = await chrome.windows.getLastFocused();
+  const active = activeTabs.find(tab => tab.windowId === focused.id) || activeTabs[0];
+  const isVideo = tab => /^https:\/\/(?:www\.)?bilibili\.com\/video\//i.test(tab?.url || "");
+  const candidates = (await chrome.tabs.query({})).filter(isVideo);
+  let preferred;
+  try { preferred = normalizeInput(request.url || "").bvid; } catch {}
+  const matching = candidates.filter(candidate => {
+    try { return normalizeInput(candidate.url).bvid === preferred; } catch { return false; }
+  });
+  const tab = isVideo(active) ? active : (matching.length ? matching : candidates).sort((a, b) => (b.lastAccessed || b.id) - (a.lastAccessed || a.id))[0];
   if (!tab) throw new Error("没有找到已打开的B站视频标签页。请先在这个Edge配置中打开视频页。");
   try {
     const response = await chrome.tabs.sendMessage(tab.id, { action: "toggleFloating" });
@@ -177,6 +175,17 @@ async function downloadBrowser(meta, pages, quality, askSave) {
   return { message: "已启动 " + ids.length + " 个文件下载。音视频分离时，请使用桌面程序的本地合并工具。", ids };
 }
 
+async function favoriteItems(folderId) {
+  const items = [];
+  for (let page = 1; ; page++) {
+    const data = await biliAPI("/x/v3/fav/resource/list", { media_id: Number(folderId), pn: page, ps: 20 });
+    items.push(...(data.medias || []).filter(item => item.bvid));
+    if (!data.has_more || !data.medias?.length) break;
+    if (items.length >= 500) throw new Error("收藏夹超过500个视频，请用桌面版分批添加。");
+  }
+  return items;
+}
+
 async function handle(request, sender) {
   // 网页内容脚本只能打开扩展界面，不能读取登录信息或添加后台任务。
   if (sender.tab && !sender.url?.startsWith(chrome.runtime.getURL("")) && request.action !== "open") {
@@ -236,14 +245,11 @@ async function handle(request, sender) {
       const result = await biliAPI("/x/v3/fav/folder/created/list-all", { up_mid: account.mid });
       return result.list || [];
     }
+    case "favoriteItems": return favoriteItems(request.folderId);
     case "favoriteDownload": {
-      const items = [];
-      for (let page = 1; ; page++) {
-        const data = await biliAPI("/x/v3/fav/resource/list", { media_id: Number(request.folderId), pn: page, ps: 20 });
-        items.push(...(data.medias || []).filter(item => item.bvid));
-        if (!data.has_more || !data.medias?.length) break;
-        if (items.length >= 500) throw new Error("收藏夹超过500个视频，请用桌面版分批勾选。");
-      }
+      const allItems = await favoriteItems(request.folderId);
+      const selected = new Set((request.selectedBvids || []).map(String));
+      const items = selected.size ? allItems.filter(item => selected.has(item.bvid)) : allItems;
       if (!items.length) throw new Error("收藏夹为空。");
       const config = await settings();
       const result = await localRequest("/tasks", {
