@@ -1,5 +1,8 @@
 (() => {
-  if (document.getElementById("bili-local-download-panel")) return;
+  globalThis.__biliLocalFloatingCleanup?.();
+  document.getElementById("bili-local-download-panel")?.remove();
+  document.getElementById("bili-local-download-button")?.remove();
+  document.querySelectorAll("#bili-local-inline-download").forEach(element => element.remove());
   const host = document.createElement("div");
   host.id = "bili-local-download-panel";
   const shadow = host.attachShadow({ mode: "closed" });
@@ -12,9 +15,11 @@
     .bar{display:flex;align-items:center;gap:8px;padding:10px 12px;background:white;border-bottom:1px solid #e3e8f0;color:#253047;font:600 13px 'Microsoft YaHei UI',sans-serif;cursor:move;touch-action:none;user-select:none}
     .bar span{flex:1}.bar button{background:#f3f6fb;color:#526077;border-radius:6px;width:30px;height:28px}.bar button:hover{background:#e1edf5}
     iframe{border:0;width:100%;flex:1;min-height:0;background:#f3f5f8}
+    .loading{padding:20px;color:#526077;font:13px/1.6 'Microsoft YaHei UI',sans-serif}.loading button{margin-top:10px;background:#e5f6fc;color:#008fbe;border-radius:6px;padding:8px 12px}
   `;
   const launcher = document.createElement("button");
   launcher.className = "launcher";
+  launcher.hidden = true;
   launcher.textContent = "↓ 下载视频";
   launcher.title = "打开悬浮下载面板；可拖动位置";
   const panel = document.createElement("section");
@@ -33,11 +38,19 @@
   close.title = "关闭面板，下载任务继续";
   const frame = document.createElement("iframe");
   frame.title = "B站视频下载器";
+  const loading = document.createElement("div");
+  loading.className = "loading";
+  loading.hidden = true;
+  const loadingText = document.createElement("div");
+  const fallback = document.createElement("button");
+  fallback.textContent = "打开独立下载页面";
+  fallback.hidden = true;
+  loading.append(loadingText, fallback);
   bar.append(title, minimize, close);
-  panel.append(bar, frame);
+  panel.append(bar, loading, frame);
   shadow.append(style, launcher, panel);
   document.documentElement.append(host);
-  let frameVideo = "", currentVideo = "", dragMoved = false, toolbarHost;
+  let frameVideo = "", currentVideo = "", dragMoved = false, toolbarHost, frameTimeout;
 
   function videoURL() {
     const match = location.pathname.match(/^\/video\/(BV[0-9A-Za-z]{10})/i);
@@ -49,7 +62,15 @@
     const video = videoURL();
     if (video && frameVideo !== video) {
       frameVideo = video;
+      loading.hidden = false;
+      loadingText.textContent = "正在打开下载面板…";
+      fallback.hidden = true;
+      clearTimeout(frameTimeout);
       frame.src = chrome.runtime.getURL("popup.html") + "?floating=1&video=" + encodeURIComponent(video);
+      frameTimeout = setTimeout(() => {
+        loadingText.textContent = "面板未能加载。请刷新视频页，或使用独立下载页面。";
+        fallback.hidden = false;
+      }, 8000);
     }
   }
   function openPanel() {
@@ -63,6 +84,19 @@
   launcher.addEventListener("click", () => { if (!dragMoved) openPanel(); });
   minimize.addEventListener("click", collapse);
   close.addEventListener("click", collapse);
+  fallback.addEventListener("click", async () => {
+    try {
+      const response = await chrome.runtime.sendMessage({ action: "open", url: videoURL() });
+      if (!response?.ok) throw new Error();
+    } catch { loadingText.textContent = "扩展已更新或暂时不可用，请刷新视频页后重试。"; }
+  });
+  const frameReady = event => {
+    if (event.source === frame.contentWindow && event.origin === "chrome-extension://" + chrome.runtime.id && event.data?.type === "biliLocalFrameReady") {
+      clearTimeout(frameTimeout);
+      loading.hidden = true;
+    }
+  };
+  window.addEventListener("message", frameReady);
   panel.addEventListener("keydown", event => { if (event.key === "Escape") collapse(); });
 
   function clamp(element) {
@@ -116,9 +150,11 @@
       }
     }
   }).catch(() => {});
-  window.addEventListener("resize", () => { if (!panel.hidden) clamp(panel); if (!launcher.hidden) clamp(launcher); });
+  const resized = () => { if (!panel.hidden) clamp(panel); if (!launcher.hidden) clamp(launcher); };
+  window.addEventListener("resize", resized);
 
   function refreshPage() {
+    if (!host.isConnected || !chrome.runtime.id) { cleanup(); return; }
     const video = videoURL();
     if (video !== currentVideo) {
       currentVideo = video;
@@ -150,9 +186,19 @@
     if (!scheduled) scheduled = setTimeout(() => { scheduled = null; refreshPage(); }, 300);
   });
   observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
-  setInterval(refreshPage, 800);
+  const interval = setInterval(refreshPage, 800);
   refreshPage();
-  chrome.runtime.onMessage.addListener((request, _sender, respond) => {
+  const receive = (request, _sender, respond) => {
     if (request.action === "toggleFloating") { panel.hidden ? openPanel() : collapse(); respond({ ok: true }); }
-  });
+  };
+  chrome.runtime.onMessage.addListener(receive);
+  function cleanup() {
+    observer.disconnect();
+    clearInterval(interval); clearTimeout(scheduled); clearTimeout(frameTimeout);
+    window.removeEventListener("resize", resized);
+    window.removeEventListener("message", frameReady);
+    try { chrome.runtime.onMessage.removeListener(receive); } catch {}
+    toolbarHost?.remove(); host.remove();
+  }
+  globalThis.__biliLocalFloatingCleanup = cleanup;
 })();

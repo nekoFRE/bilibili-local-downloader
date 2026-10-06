@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(14)
         login_card, login = card()
         login.addWidget(label("登录与画质", "sectionTitle"))
-        login.addWidget(label("选择已有cookie.txt，或粘贴Cookie。保存的登录信息使用Windows当前用户加密。", "muted"))
+        login.addWidget(label("可从Edge扩展同步登录，也可导入或粘贴Cookie。Edge同步默认只在本次运行中使用，需要保留时点击“保存当前登录”。", "muted"))
         self.cookie_input = QPlainTextEdit()
         self.cookie_input.setPlaceholderText("在这里粘贴Cookie（不会显示在日志中）")
         self.cookie_input.setMaximumHeight(85)
@@ -267,6 +267,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(button("导入Cookie文件", self.import_cookie))
         row.addWidget(button("保存并检查登录", self.save_cookie_text, True))
+        row.addWidget(button("保存当前登录", self.save_current_login))
         row.addWidget(button("退出登录", self.clear_cookie))
         row.addStretch()
         login.addLayout(row)
@@ -449,6 +450,12 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def refresh(self, *_):
+        try:
+            login = self.manager.login_updates.get_nowait()
+            if login["revision"] == self.manager.login_revision:
+                self.show_account(login["account"])
+        except queue.Empty:
+            pass
         if not self.manager.window_requests.empty():
             while not self.manager.window_requests.empty():
                 try:
@@ -540,14 +547,31 @@ class MainWindow(QMainWindow):
     def check_account(self):
         self.login_status.setText("正在检查登录状态…")
         cookies = dict(self.manager.cookies)
+        revision = self.manager.login_revision
         def success(account):
-            self.account_label.setText(account["name"])
-            self.login_status.setText(f'已登录：{account["name"]}' + (" · 大会员" if account["vip"] else ""))
-            self.notice.setText("登录状态已验证。")
+            if revision == self.manager.login_revision:
+                self.show_account(account)
         def error(message):
-            self.account_label.setText("登录待更新")
-            self.login_status.setText(message)
+            if revision == self.manager.login_revision:
+                self.account_label.setText("登录待更新")
+                self.login_status.setText(message)
         self.async_job(lambda: account_info(cookies), success, error)
+
+    def show_account(self, account):
+        self.account_label.setText(account["name"])
+        source = " · 来自Edge（本次运行有效，未保存本次登录）" if self.manager.cookie_source == "Edge临时同步" else " · 已加密保存"
+        self.login_status.setText(f'已登录：{account["name"]}' + (" · 大会员" if account["vip"] else "") + source)
+        self.notice.setText("B站登录状态已验证，可在桌面解析视频和加载收藏夹。")
+
+    def save_current_login(self):
+        if not self.manager.cookies:
+            self.notice.setText("先从Edge扩展同步登录，或导入Cookie，再保存当前登录。")
+            return
+        try:
+            self.manager.set_cookies(dict(self.manager.cookies))
+            self.check_account()
+        except Exception:
+            QMessageBox.warning(self, "保存失败", "无法保存当前登录信息，请检查程序目录是否可写。")
 
     def clear_cookie(self):
         self.manager.set_cookies({})

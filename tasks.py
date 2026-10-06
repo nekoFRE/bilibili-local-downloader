@@ -16,10 +16,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from downloader import APP_ROOT, Cancelled, download_video, normalize_input, video_metadata
+from downloader import APP_ROOT, Cancelled, DownloadError, account_info, download_video, normalize_input, video_metadata
 
 PORT = 17890
 FINISHED = {"已完成", "已跳过", "失败", "已取消", "已中断"}
+
+
+def checked_cookies(value):
+    if not isinstance(value, dict) or len(value) > 200:
+        raise ValueError("登录数据格式不正确")
+    if any(not isinstance(k, str) or not re.fullmatch(r"[A-Za-z0-9_!#$%&'*+.^`|~-]{1,128}", k) or not isinstance(v, str) or len(v) > 16384 or re.search(r"[\x00-\x1f\x7f]", v) for k, v in value.items()):
+        raise ValueError("登录数据格式不正确")
+    return dict(value)
 
 
 def atomic_json(path, value):
@@ -107,6 +115,9 @@ class TaskManager:
         self.paused = False
         self.active_id = None
         self.cookies = settings.cookies()
+        self.login_revision = 0
+        self.cookie_source = "本地保存" if self.cookies else ""
+        self.login_updates = queue.Queue(maxsize=1)
         self.task_cookies = {}
         self.tasks = []
         self.history_path = settings.data_dir / "tasks.json"
@@ -155,10 +166,23 @@ class TaskManager:
         self.wakeup.set()
         return added
 
-    def set_cookies(self, cookies):
-        self.settings.save_cookies(cookies)
+    def set_cookies(self, cookies, persist=True, source="本地保存"):
         with self.lock:
+            if persist:
+                self.settings.save_cookies(cookies)
             self.cookies = dict(cookies)
+            self.cookie_source = source if cookies else ""
+            self.login_revision += 1
+            return self.login_revision
+
+    def sync_login(self, cookies, account):
+        with self.lock:
+            revision = self.set_cookies(cookies, persist=False, source="Edge临时同步")
+            try:
+                self.login_updates.get_nowait()
+            except queue.Empty:
+                pass
+            self.login_updates.put_nowait({"account": dict(account), "revision": revision})
 
     def cancel_task(self, task_id):
         with self.lock:
@@ -288,10 +312,10 @@ class Bridge:
 
             def do_GET(self):
                 if self.path == "/health" and self.valid_host() and self.allowed_origin():
-                    self.reply(200, {"app": "bili-local-downloader", "version": "1.1.0"})
+                    self.reply(200, {"app": "bili-local-downloader", "version": "1.1.1"})
                 elif self.authenticate():
                     if self.path == "/status":
-                        self.reply(200, {"directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
+                        self.reply(200, {"version": "1.1.1", "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
                     elif urlparse(self.path).path == "/directory-result":
                         request_id = parse_qs(urlparse(self.path).query).get("id", [""])[0]
                         request = bridge.directory_results.get(request_id)
@@ -314,12 +338,23 @@ class Bridge:
                         raise ValueError("请求大小不正确")
                     self.connection.settimeout(10)
                     body = json.loads(self.rfile.read(size))
+                    if not isinstance(body, dict):
+                        raise ValueError("请求格式不正确")
                     if self.path == "/tasks":
-                        cookies = body.get("cookies") or {}
-                        if not isinstance(cookies, dict) or len(cookies) > 200 or any(not isinstance(v, str) for v in cookies.values()):
-                            raise ValueError("登录数据格式不正确")
+                        cookies = checked_cookies(body.get("cookies") or {})
                         ids = bridge.manager.add(body.get("tasks") or [], cookies)
                         self.reply(200, {"added": len(ids), "ids": ids})
+                    elif self.path == "/login":
+                        cookies = checked_cookies(body.get("cookies") or {})
+                        if not cookies.get("SESSDATA"):
+                            raise ValueError("没有获取到B站登录信息，请先在Edge中登录B站。")
+                        try:
+                            account = account_info(cookies)
+                        except Exception:
+                            # 不返回网络库异常，它们可能包含登录请求头。
+                            raise ValueError("B站登录验证失败，请确认Edge已登录、网络正常，然后重新同步。") from None
+                        bridge.manager.sync_login(cookies, account)
+                        self.reply(200, {"synced": True, "name": account["name"], "vip": account["vip"], "persisted": False})
                     elif self.path == "/show-window":
                         try:
                             bridge.manager.window_requests.put_nowait(True)
@@ -337,7 +372,7 @@ class Bridge:
                         self.reply(200, {"id": request_id})
                     else:
                         self.reply(404, {"error": "没有这个接口"})
-                except (ValueError, KeyError, TypeError, OSError) as exc:
+                except (ValueError, KeyError, TypeError, OSError, DownloadError) as exc:
                     self.reply(400, {"error": str(exc)[:300]})
         try:
             self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)

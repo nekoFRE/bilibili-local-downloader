@@ -1,7 +1,7 @@
 import { normalizeInput, safeName, chooseVideo, qualityList, mediaUrl } from "./core.js";
 
 const LOCAL = "http://127.0.0.1:17890";
-const defaults = { token: "", directory: "", mode: "desktop", askSave: true };
+const defaults = { token: "", directory: "", mode: "desktop", askSave: true, syncLogin: true };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function settings() {
@@ -78,6 +78,51 @@ async function cookies() {
   return Object.fromEntries(all.map(cookie => [cookie.name, cookie.value]));
 }
 
+async function syncLogin() {
+  const loginCookies = await cookies();
+  if (!loginCookies.SESSDATA) throw new Error("当前Edge尚未登录B站。请在安装本扩展的Edge配置中登录后再同步。");
+  try {
+    return await localRequest("/login", { cookies: loginCookies }, 35000);
+  } catch (error) {
+    if (error.message.includes("没有这个接口")) throw new Error("桌面程序版本较旧，请从托盘退出并打开新版，再同步登录。");
+    throw error;
+  }
+}
+
+async function toggleFloating(request) {
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const isVideo = tab => /^https:\/\/www\.bilibili\.com\/video\//.test(tab?.url || "");
+  let tab = isVideo(active) ? active : null;
+  if (!tab) {
+    let candidates = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*", currentWindow: true });
+    if (!candidates.length) candidates = await chrome.tabs.query({ url: "https://www.bilibili.com/video/*" });
+    let preferred;
+    try { preferred = normalizeInput(request.url || "").bvid; } catch {}
+    const matching = candidates.filter(candidate => {
+      try { return normalizeInput(candidate.url).bvid === preferred; } catch { return false; }
+    });
+    tab = (matching.length ? matching : candidates).sort((a, b) => (b.lastAccessed || b.id) - (a.lastAccessed || a.id))[0];
+  }
+  if (!tab) throw new Error("没有找到已打开的B站视频标签页。请先在这个Edge配置中打开视频页。");
+  try {
+    const response = await chrome.tabs.sendMessage(tab.id, { action: "toggleFloating" });
+    if (!response?.ok) throw new Error("页面脚本尚未就绪");
+  } catch {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
+      const response = await chrome.tabs.sendMessage(tab.id, { action: "toggleFloating" });
+      if (!response?.ok) throw new Error("页面脚本未响应");
+    } catch {
+      throw new Error("无法在视频页加载悬浮面板。请允许扩展访问B站，刷新视频页后重试。");
+    }
+  }
+  if (tab.id !== active?.id) {
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true });
+  }
+  return { opened: true };
+}
+
 async function browserFile(url, filename, askSave) {
   // 规则只匹配这个下载地址，为B站媒体请求设置Referer。
   const rules = await chrome.declarativeNetRequest.getSessionRules();
@@ -145,6 +190,22 @@ async function handle(request, sender) {
     }
     case "inspect": return inspect(request.url);
     case "status": return localRequest("/status");
+    case "toggleFloating": return toggleFloating(request);
+    case "syncLogin": return syncLogin();
+    case "connect": {
+      const result = await localRequest("/status");
+      const config = await settings();
+      if (config.syncLogin) {
+        try {
+          const account = await syncLogin();
+          result.loginMessage = "已同步Edge登录：" + account.name + "（本次运行有效，未保存Cookie）。";
+        } catch (error) {
+          result.loginMessage = "本机连接成功，但登录未同步：" + error.message;
+          result.loginWarning = true;
+        }
+      } else result.loginMessage = "已关闭自动同步登录；需要时可手动同步。";
+      return result;
+    }
     case "chooseDirectory": {
       const begin = await localRequest("/choose-directory", {});
       for (let i = 0; i < 180; i++) {

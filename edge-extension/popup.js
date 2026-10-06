@@ -80,11 +80,14 @@ $("refresh").addEventListener("click", () => busy("refresh", async () => {
 }));
 $("options").addEventListener("click", () => chrome.runtime.openOptionsPage());
 $("floating").addEventListener("click", () => busy("floating", async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.url || !/^https:\/\/www\.bilibili\.com\/video\//.test(tab.url)) throw new Error("先打开B站视频页，再使用悬浮面板。");
-  try { await chrome.tabs.sendMessage(tab.id, { action: "toggleFloating" }); }
-  catch { throw new Error("请刷新B站视频页后重试。"); }
-  window.close();
+  await send({ action: "toggleFloating", url: meta?.url || $("url").value });
+  status("已在B站视频标签页打开悬浮面板。");
+  if (!new URLSearchParams(location.search).has("video")) window.close();
+}));
+$("sync-login").addEventListener("click", () => busy("sync-login", async () => {
+  status("正在同步Edge登录到桌面…");
+  const account = await send({ action: "syncLogin" });
+  status("桌面已登录：" + account.name + "（本次运行有效，未保存Cookie）。");
 }));
 $("expand").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("popup.html") + ($("url").value ? "?video=" + encodeURIComponent($("url").value) : "") }));
 $("folders").addEventListener("click", () => busy("folders", async () => {
@@ -113,4 +116,5 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (preset) { $("url").value = preset; await inspect(); return; }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.url && /https:\/\/www\.bilibili\.com\/video\//.test(tab.url)) { $("url").value = tab.url; await inspect(); }
-})();
+})().catch(error => status(error.message || "扩展初始化失败，请重新加载扩展后重试。", true));
+if (floating) window.parent.postMessage({ type: "biliLocalFrameReady" }, "https://www.bilibili.com");
