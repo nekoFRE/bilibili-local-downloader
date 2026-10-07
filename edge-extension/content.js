@@ -51,10 +51,10 @@
   shadow.append(style, launcher, panel);
   document.documentElement.append(host);
   let frameVideo = "", currentVideo = "", dragMoved = false, toolbarHost, frameTimeout;
-  let extensionEnabled = true, floatingEnabled = true;
+  let extensionEnabled = false, floatingEnabled = false;
 
   function videoURL() {
-    const match = location.href.match(/BV[0-9A-Za-z]{10}/i);
+    const match = location.href.match(/(BV[0-9A-Za-z]{10})/i);
     if (!match) return "";
     const params = new URLSearchParams(location.search);
     const page = Number(params.get("p") || params.get("page")) || 1;
@@ -168,8 +168,11 @@
       else { launcher.hidden = !panel.hidden; if (!panel.hidden) loadVideo(); }
     }
     if (!video) return;
-    const toolbar = document.querySelector("#arc_toolbar_report .video-toolbar-left, .video-toolbar-left, .video-toolbar-container, .video-info-detail");
-    if (!toolbar) return;
+    // B站先显示服务端HTML，再由Vue接管。此时修改子节点会使接管失败、整页重绘。
+    // load事件也可能早于Vue初始化；必须等SSR标记消失，且只使用真正的操作栏。
+    if (document.readyState !== "complete") return;
+    const toolbar = document.querySelector("#arc_toolbar_report .video-toolbar-left, .video-toolbar-left");
+    if (!toolbar || toolbar.closest("[data-server-rendered]")) return;
     if (toolbarHost?.isConnected) {
       if (toolbarHost.parentNode !== toolbar) toolbar.append(toolbarHost);
       return;
