@@ -19,9 +19,12 @@ $taskAssets = Join-Path $PSScriptRoot 'assets'
 $taskFFmpeg = Join-Path $PSScriptRoot 'tools\ffmpeg.exe'
 & $taskPython -m PyInstaller --noconfirm --clean --onedir --windowed --name 'B站视频下载器' --distpath (Join-Path $taskBuild '发行版') --workpath (Join-Path $taskBuild '临时') --specpath $taskBuild --icon (Join-Path $taskAssets 'icon.ico') --add-data "$taskAssets;assets" --add-binary "$taskFFmpeg;tools" (Join-Path $PSScriptRoot 'main.py')
 if ($LASTEXITCODE -ne 0) { throw '打包失败，请查看上面的信息。' }
+& $taskPython -m PyInstaller --noconfirm --clean --onefile --console --name 'browser-bridge' --distpath (Join-Path $taskBuild '助手') --workpath (Join-Path $taskBuild '助手临时') --specpath $taskBuild (Join-Path $PSScriptRoot 'browser_bridge.py')
+if ($LASTEXITCODE -ne 0) { throw '唤醒助手打包失败，请查看上面的信息。' }
 New-Item -ItemType Directory -Path $taskRelease -Force | Out-Null
 $taskStagedRelease = Join-Path $taskBuild '发行版\B站视频下载器'
 Get-ChildItem -LiteralPath $taskStagedRelease | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $taskRelease -Recurse -Force }
+Copy-Item -LiteralPath (Join-Path $taskBuild '助手\browser-bridge.exe') -Destination $taskRelease -Force
 Copy-Item -LiteralPath 'edge-extension' -Destination $taskRelease -Recurse -Force
 Copy-Item -LiteralPath '使用说明.md' -Destination $taskRelease -Force
 Copy-Item -LiteralPath 'tools\FFmpeg-LICENSE.txt' -Destination $taskRelease -Force

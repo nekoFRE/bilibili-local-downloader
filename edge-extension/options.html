@@ -14,6 +14,8 @@
 <input id="token" type="password" placeholder="粘贴连接码" autocomplete="off">
 <div class="row"><button id="save" class="primary">保存并检查连接</button><button id="reset-dir">跟随桌面默认目录</button></div>
 <p id="directory" class="path"></p>
+<label class="check"><input id="auto-wake" type="checkbox" checked>需要下载时自动在后台启动桌面端</label>
+<p class="hint">首次手动打开新版发行版并保存连接码即可配置，无需管理员权限。之后无需提前打开桌面程序；更换发行版位置或重新安装扩展后，再保存一次连接码。</p>
 <label class="check"><input id="sync-login" type="checkbox" checked>连接成功后，将Edge的B站登录同步到桌面</label>
 <div class="row"><button id="sync-now">立即同步登录</button></div>
 <p class="hint">同步默认仅在桌面程序本次运行中使用。需要长期保存时，在桌面设置中点击“保存当前登录”。</p>

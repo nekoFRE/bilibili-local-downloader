@@ -24,6 +24,8 @@ def main():
     lock = QLockFile(str(settings.data_dir / "app.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(100):
+        if "--background" in sys.argv:
+            return 0
         try:
             session = requests.Session()
             session.trust_env = False
@@ -36,7 +38,10 @@ def main():
     manager = TaskManager(settings)
     bridge = Bridge(manager)
     window = MainWindow(settings, manager, bridge)
-    window.show()
+    if "--background" in sys.argv and window.tray is not None:
+        window.tray_notice_shown = True
+    else:
+        window.show()
     # Automated visual smoke checks use an ordinary render of this same window.
     if "--screenshot" in sys.argv:
         index = sys.argv.index("--screenshot")

@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(login_card)
         bridge_card, bridge_layout = card()
         bridge_layout.addWidget(label("连接Edge浏览器扩展", "sectionTitle"))
-        bridge_layout.addWidget(label("打开Edge扩展的设置，粘贴连接码。浏览器里的B站登录状态会随任务传给本机下载器。", "muted"))
+        bridge_layout.addWidget(label("在Edge扩展设置中粘贴连接码并保存，即可配置自动唤醒。以后下载时会在后台启动本程序，B站登录状态随任务传入。", "muted"))
         row = QHBoxLayout()
         self.token = QLineEdit(self.settings.values["token"])
         self.token.setReadOnly(True)

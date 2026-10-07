@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from browser_bridge import register_host
 from downloader import APP_ROOT, Cancelled, DownloadError, account_info, download_video, normalize_input, video_metadata
 
 PORT = 17890
@@ -312,10 +313,10 @@ class Bridge:
 
             def do_GET(self):
                 if self.path == "/health" and self.valid_host() and self.allowed_origin():
-                    self.reply(200, {"app": "bili-local-downloader", "version": "1.3.1"})
+                    self.reply(200, {"app": "bili-local-downloader", "version": "1.4.0"})
                 elif self.authenticate():
                     if self.path == "/status":
-                        self.reply(200, {"version": "1.3.1", "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
+                        self.reply(200, {"version": "1.4.0", "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
                     elif urlparse(self.path).path == "/directory-result":
                         request_id = parse_qs(urlparse(self.path).query).get("id", [""])[0]
                         request = bridge.directory_results.get(request_id)
@@ -355,6 +356,9 @@ class Bridge:
                             raise ValueError("B站登录验证失败，请确认Edge已登录、网络正常，然后重新同步。") from None
                         bridge.manager.sync_login(cookies, account)
                         self.reply(200, {"synced": True, "name": account["name"], "vip": account["vip"], "persisted": False})
+                    elif self.path == "/browser-setup":
+                        result = register_host(bridge.manager.settings.root, body.get("extensionId"), self.headers.get("Origin"))
+                        self.reply(200, result)
                     elif self.path == "/show-window":
                         try:
                             bridge.manager.window_requests.put_nowait(True)

@@ -1,9 +1,10 @@
 const $ = id => document.getElementById(id);
 async function load() {
-  const config = await chrome.storage.local.get({ token: "", directory: "", askSave: true, syncLogin: true, extensionEnabled: true, floatingEnabled: true });
+  const config = await chrome.storage.local.get({ token: "", directory: "", askSave: true, syncLogin: true, autoWake: true, extensionEnabled: true, floatingEnabled: true });
   $("token").value = config.token;
   $("ask-save").checked = config.askSave;
   $("sync-login").checked = config.syncLogin;
+  $("auto-wake").checked = config.autoWake;
   $("extension-enabled").checked = config.extensionEnabled;
   $("floating-enabled").checked = config.floatingEnabled;
   $("directory").textContent = "保存目录：" + (config.directory || "跟随桌面程序");
@@ -19,17 +20,24 @@ $("floating-enabled").addEventListener("change", async () => {
   $("status").className = "";
 });
 $("save").addEventListener("click", async () => {
-  await chrome.storage.local.set({ token: $("token").value.trim(), askSave: $("ask-save").checked });
+  await chrome.storage.local.set({ token: $("token").value.trim(), askSave: $("ask-save").checked, autoWake: $("auto-wake").checked });
   $("save").disabled = true;
+  $("status").textContent = "正在连接桌面并配置自动唤醒…首次配置请先手动打开新版发行版。";
+  $("status").className = "";
   try {
     const response = await chrome.runtime.sendMessage({ action: "connect" });
     if (!response?.ok) throw new Error(response?.error || "连接失败");
-    $("status").textContent = "连接成功。" + response.data.loginMessage + " 桌面保存目录：" + response.data.directory;
-    $("status").className = response.data.loginWarning ? "error" : "";
+    $("status").textContent = "连接成功。" + response.data.wakeMessage + " " + response.data.loginMessage + " 桌面保存目录：" + response.data.directory;
+    $("status").className = response.data.loginWarning || response.data.wakeWarning ? "error" : "";
   } catch (error) { $("status").textContent = error.message; $("status").className = "error"; }
   finally { $("save").disabled = false; }
 });
 $("sync-login").addEventListener("change", () => chrome.storage.local.set({ syncLogin: $("sync-login").checked }));
+$("auto-wake").addEventListener("change", async () => {
+  await chrome.storage.local.set({ autoWake: $("auto-wake").checked });
+  $("status").textContent = $("auto-wake").checked ? "自动唤醒已开启；首次使用请点击“保存并检查连接”完成配置。" : "自动唤醒已关闭，仍可点击“打开桌面端”手动唤醒。";
+  $("status").className = "";
+});
 $("sync-now").addEventListener("click", async () => {
   $("sync-now").disabled = true;
   try {

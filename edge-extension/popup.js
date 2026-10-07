@@ -2,8 +2,9 @@ let meta = null;
 let favoriteItems = [];
 let favoriteAdvancedLoaded = false;
 let favoriteSelection = new Set();
+let autoWake = true;
 const $ = id => document.getElementById(id);
-const defaults = { token: "", directory: "", mode: "desktop", askSave: true, extensionEnabled: true, floatingEnabled: true };
+const defaults = { token: "", directory: "", mode: "desktop", askSave: true, autoWake: true, extensionEnabled: true, floatingEnabled: true };
 const floating = new URLSearchParams(location.search).get("floating") === "1";
 if (floating) { document.body.classList.add("floating"); $("floating").hidden = true; }
 const status = (text, error = false) => { $("status").textContent = text; $("status").className = error ? "error" : ""; };
@@ -63,7 +64,7 @@ function updateMode() {
   $("directory").hidden = browser;
   $("mode-note").textContent = browser
     ? "使用Edge保存对话框选择文件位置。DASH音视频会分别保存，需要本地合并。"
-    : "打开桌面程序，扩展会使用Edge中的B站登录状态。";
+    : autoWake ? "下载时自动唤醒桌面端，在后台合并MP4。首次请到设置完成连接。" : "自动唤醒已关闭。请先打开桌面端，或在设置中开启自动唤醒。";
 }
 
 $("inspect").addEventListener("click", inspect);
@@ -74,7 +75,7 @@ $("download").addEventListener("click", () => busy("download", async () => {
   if (!meta) throw new Error("请先解析视频。");
   const pages = [...document.querySelectorAll('#pages input:checked')].map(input => Number(input.value));
   if (!pages.length) throw new Error("请至少选择一个分P。");
-  status("正在添加下载任务…");
+  status(mode() === "browser" ? "正在提交浏览器下载…" : "正在连接桌面端并添加任务，首次唤醒可能需要几秒…");
   const result = await send({ action: "download", url: meta.url, pages, quality: Number($("quality").value), mode: mode() });
   status(result.message);
 }));
@@ -92,6 +93,11 @@ $("refresh").addEventListener("click", () => busy("refresh", async () => {
   status("本机已连接 · " + active + " 个进行中的任务");
 }));
 $("options").addEventListener("click", () => chrome.runtime.openOptionsPage());
+$("open-desktop").addEventListener("click", () => busy("open-desktop", async () => {
+  status("正在唤醒并打开桌面端，请稍候…");
+  await send({ action: "wakeDesktop" });
+  status("桌面窗口已打开，可查看下载队列。");
+}));
 $("quick-enabled").addEventListener("change", async () => {
   const enabled = $("quick-enabled").checked;
   await chrome.storage.local.set({ extensionEnabled: enabled });
@@ -168,12 +174,14 @@ $("favorite-download").addEventListener("click", () => busy("favorite-download",
   status(result.message);
 }));
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.autoWake) { autoWake = changes.autoWake.newValue !== false; updateMode(); }
   if (area === "local" && changes.directory) $("directory").textContent = "保存目录：" + (changes.directory.newValue || "桌面程序的默认目录");
   if (area === "local" && (changes.extensionEnabled || changes.floatingEnabled)) chrome.storage.local.get(defaults).then(applyFeatureState);
 });
 
 (async () => {
   const config = await chrome.storage.local.get(defaults);
+  autoWake = config.autoWake !== false;
   applyFeatureState(config);
   document.querySelector('input[name="mode"][value="' + (config.mode === "browser" ? "browser" : "desktop") + '"]').checked = true;
   $("directory").textContent = "保存目录：" + (config.directory || "桌面程序的默认目录");

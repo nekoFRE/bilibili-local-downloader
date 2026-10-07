@@ -1,8 +1,10 @@
 import { normalizeInput, safeName, chooseVideo, qualityList, mediaUrl } from "./core.js";
 
 const LOCAL = "http://127.0.0.1:17890";
-const defaults = { token: "", directory: "", mode: "desktop", askSave: true, syncLogin: true, extensionEnabled: true, floatingEnabled: true };
+const NATIVE_HOST = "com.bili_local.downloader";
+const defaults = { token: "", directory: "", mode: "desktop", askSave: true, syncLogin: true, autoWake: true, extensionEnabled: true, floatingEnabled: true };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+let desktopReadyPromise = null;
 
 async function settings() {
   return chrome.storage.local.get(defaults);
@@ -33,9 +35,41 @@ async function ensureEnabled(action) {
   if (action === "toggleFloating" && config.floatingEnabled === false) throw new Error("视频页悬浮窗已停用，请在扩展设置中重新启用。");
 }
 
-async function localRequest(path, body, timeout = 12000) {
+async function desktopHealthy() {
+  let response;
+  try { response = await fetch(LOCAL + "/health", { signal: AbortSignal.timeout(1200) }); }
+  catch { return false; }
+  let data;
+  try { data = await response.json(); } catch {}
+  if (!response.ok || data?.app !== "bili-local-downloader") throw new Error("本机17890端口被其他程序占用，请检查后重试。");
+  return true;
+}
+
+async function ensureDesktop(config, forceWake = false) {
+  if (await desktopHealthy()) return;
+  if (!forceWake && config.autoWake === false) throw new Error("桌面程序未运行。请点击“打开桌面端”，或在设置中启用自动唤醒。");
+  // 同时点击多个操作也只唤醒一次；实际下载请求从不自动重发。
+  if (!desktopReadyPromise) {
+    desktopReadyPromise = (async () => {
+      let response;
+      try { response = await chrome.runtime.sendNativeMessage(NATIVE_HOST, { action: "wake" }); }
+      catch { throw new Error("尚未配置自动唤醒，或发行版位置已改变。请手动打开新版桌面程序，在扩展设置中重新“保存并检查连接”。"); }
+      if (!response?.ok) throw new Error(response?.error || "桌面程序唤醒失败，请重新保存连接码。");
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        if (await desktopHealthy()) return;
+        await pause(300);
+      }
+      throw new Error("已发送唤醒请求，但桌面程序未能及时启动。请手动打开发行版，检查启动提示后再重试。");
+    })().finally(() => { desktopReadyPromise = null; });
+  }
+  await desktopReadyPromise;
+}
+
+async function localRequest(path, body, timeout = 12000, forceWake = false) {
   const config = await settings();
   if (!config.token) throw new Error("先在扩展设置中粘贴桌面程序的连接码。");
+  await ensureDesktop(config, forceWake);
   let response;
   try {
     response = await fetch(LOCAL + path, {
@@ -45,7 +79,7 @@ async function localRequest(path, body, timeout = 12000) {
       signal: AbortSignal.timeout(timeout),
     });
   } catch {
-    throw new Error("无法连接本机下载器，请先打开桌面程序。");
+    throw new Error("本机请求中断。请打开桌面端检查任务队列，再决定是否重试。");
   }
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "本机请求失败");
@@ -238,9 +272,19 @@ async function handle(request, sender) {
     case "status": return localRequest("/status");
     case "toggleFloating": return toggleFloating(request);
     case "syncLogin": return syncLogin();
+    case "wakeDesktop": return localRequest("/show-window", {}, 12000, true);
     case "connect": {
       const result = await localRequest("/status");
       const config = await settings();
+      if (config.autoWake !== false) {
+        try {
+          await localRequest("/browser-setup", { extensionId: chrome.runtime.id });
+          result.wakeMessage = "自动唤醒已配置，以后下载时会在后台启动桌面端。";
+        } catch (error) {
+          result.wakeMessage = "自动唤醒未配置：" + error.message;
+          result.wakeWarning = true;
+        }
+      } else result.wakeMessage = "自动唤醒已关闭，需要时可点击“打开桌面端”。";
       if (config.syncLogin) {
         try {
           const account = await syncLogin();

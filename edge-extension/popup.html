@@ -10,7 +10,7 @@
     <div class="row"><label for="quality">画质</label><select id="quality"><option value="0">自动 · 最高可用</option></select><label class="check"><input id="all-pages" type="checkbox">全选分P</label></div>
     <div id="pages"></div>
     <div class="row modes"><label class="check"><input name="mode" value="desktop" type="radio" checked>桌面合并MP4</label><label class="check"><input name="mode" value="browser" type="radio">浏览器直接下载</label></div>
-    <p id="mode-note" class="hint">打开桌面程序，扩展会使用Edge中的B站登录状态。</p>
+    <p id="mode-note" class="hint">下载时自动唤醒桌面端，在后台合并MP4。首次请到设置完成连接。</p>
     <p id="directory" class="path">保存目录：桌面程序的默认目录</p>
     <div class="row"><button id="choose-dir">选择保存目录</button><button id="download" class="primary" disabled>开始下载</button></div>
   </section>
@@ -26,7 +26,7 @@
     <p class="hint">批量任务由桌面程序下载、合并，失效视频不会影响其他任务。</p>
   </section>
   <p id="status" role="status">准备好了。</p>
-  <button id="sync-login" class="light">同步Edge登录到桌面</button>
+  <div class="row"><button id="open-desktop" class="light">打开桌面端</button><button id="sync-login" class="light">同步Edge登录到桌面</button></div>
   <footer><button id="refresh" class="light">检查本机连接</button><button id="floating" class="light">在视频页悬浮</button><button id="expand" class="light">独立页面</button></footer>
 </main>
 <script src="popup.js"></script>
