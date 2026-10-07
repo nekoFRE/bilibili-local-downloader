@@ -8,6 +8,25 @@ async function settings() {
   return chrome.storage.local.get(defaults);
 }
 
+async function updateActionBadge(config) {
+  if (!chrome.action?.setBadgeText) return;
+  const enabled = config.extensionEnabled !== false;
+  await chrome.action.setBadgeText({ text: enabled ? "" : "Off" });
+  await chrome.action.setBadgeBackgroundColor({ color: enabled ? "#00a2d6" : "#ef3340" });
+  await chrome.action.setTitle({ title: enabled ? "B站视频下载器" : "B站视频下载器（已停用）" });
+}
+
+async function refreshActionBadge() {
+  try { await updateActionBadge(await settings()); } catch {}
+}
+
+chrome.runtime.onInstalled?.addListener(refreshActionBadge);
+chrome.runtime.onStartup?.addListener(refreshActionBadge);
+chrome.storage.onChanged?.addListener((changes, area) => {
+  if (area === "local" && changes.extensionEnabled) refreshActionBadge();
+});
+refreshActionBadge();
+
 async function ensureEnabled(action) {
   const config = await settings();
   if (config.extensionEnabled === false) throw new Error("插件当前已停用，请在扩展设置中重新启用。");

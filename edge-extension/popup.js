@@ -11,6 +11,9 @@ function applyFeatureState(config) {
   const enabled = config.extensionEnabled !== false;
   const floatingEnabled = config.floatingEnabled !== false;
   $("floating").disabled = !enabled || !floatingEnabled;
+  $("quick-enabled").checked = enabled;
+  $("quick-state").textContent = enabled ? "ON" : "OFF";
+  $("quick-control").classList.toggle("off", !enabled);
   document.body.classList.toggle("extension-disabled", !enabled);
   if (!enabled) status("插件当前已停用，请打开设置重新启用。", true);
 }
@@ -89,6 +92,11 @@ $("refresh").addEventListener("click", () => busy("refresh", async () => {
   status("本机已连接 · " + active + " 个进行中的任务");
 }));
 $("options").addEventListener("click", () => chrome.runtime.openOptionsPage());
+$("quick-enabled").addEventListener("change", async () => {
+  const enabled = $("quick-enabled").checked;
+  await chrome.storage.local.set({ extensionEnabled: enabled });
+  status(enabled ? "插件已启用。" : "插件已停用。", !enabled);
+});
 $("floating").addEventListener("click", () => busy("floating", async () => {
   await send({ action: "toggleFloating", url: meta?.url || $("url").value });
   status("已在B站视频标签页打开悬浮面板。");
