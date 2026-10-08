@@ -12,8 +12,9 @@
 <h2>桌面连接码</h2>
 <p class="hint">打开桌面程序 → 设置与连接 → 复制连接码，粘贴到这里。</p>
 <input id="token" type="password" placeholder="粘贴连接码" autocomplete="off">
-<div class="row"><button id="save" class="primary">保存并检查连接</button><button id="reset-dir">跟随桌面默认目录</button></div>
+<div class="row"><button id="save" class="primary">保存并检查连接</button><button id="reset-dir">同步桌面目录</button></div>
 <p id="directory" class="path"></p>
+<p class="hint">桌面和插件共用保存目录，修改任一端后会同步；已经排队的任务保留加入时的目录。</p>
 <label class="check"><input id="auto-wake" type="checkbox" checked>需要下载时自动在后台启动桌面端</label>
 <p class="hint">首次手动打开新版发行版并保存连接码即可配置，无需管理员权限。之后无需提前打开桌面程序；更换发行版位置或重新安装扩展后，再保存一次连接码。</p>
 <label class="check"><input id="sync-login" type="checkbox" checked>连接成功后，将Edge的B站登录同步到桌面</label>
@@ -23,4 +24,4 @@
 <p class="hint">桌面模式支持任意目录并自动合并MP4。浏览器模式使用Edge下载管理器，DASH音视频分开保存。</p>
 <p class="hint">连接只使用127.0.0.1。Cookie随下载任务传给本机，不保存在扩展设置里。</p>
 </section><p id="status" role="status">准备好了。</p></main>
-<script src="options.js"></script></body></html>
+<script src="options.js"></script><script src="directory.js"></script></body></html>

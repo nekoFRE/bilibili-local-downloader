@@ -66,10 +66,10 @@ async function ensureDesktop(config, forceWake = false) {
   await desktopReadyPromise;
 }
 
-async function localRequest(path, body, timeout = 12000, forceWake = false) {
+async function localRequest(path, body, timeout = 12000, { forceWake = false, wake = true } = {}) {
   const config = await settings();
   if (!config.token) throw new Error("先在扩展设置中粘贴桌面程序的连接码。");
-  await ensureDesktop(config, forceWake);
+  if (wake) await ensureDesktop(config, forceWake);
   let response;
   try {
     response = await fetch(LOCAL + path, {
@@ -83,6 +83,10 @@ async function localRequest(path, body, timeout = 12000, forceWake = false) {
   }
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || "本机请求失败");
+  // directory只缓存界面显示；任务保存位置始终由桌面端在入队时决定。
+  if (path === "/status" && typeof result.directory === "string" && result.directory !== config.directory) {
+    await chrome.storage.local.set({ directory: result.directory });
+  }
   return result;
 }
 
@@ -270,9 +274,13 @@ async function handle(request, sender) {
     }
     case "inspect": return inspect(request.url);
     case "status": return localRequest("/status");
+    case "directory": {
+      const result = await localRequest("/status", undefined, 1800, { wake: false });
+      return { directory: result.directory };
+    }
     case "toggleFloating": return toggleFloating(request);
     case "syncLogin": return syncLogin();
-    case "wakeDesktop": return localRequest("/show-window", {}, 12000, true);
+    case "wakeDesktop": return localRequest("/show-window", {}, 12000, { forceWake: true });
     case "connect": {
       const result = await localRequest("/status");
       const config = await settings();
@@ -315,7 +323,7 @@ async function handle(request, sender) {
       const config = await settings();
       if (request.mode === "browser") return downloadBrowser(meta, pages, Number(request.quality) || 0, config.askSave);
       const result = await localRequest("/tasks", {
-        tasks: pages.map(page => ({ url: meta.url, title: meta.title, page, quality: Number(request.quality) || 0, directory: config.directory || undefined })),
+        tasks: pages.map(page => ({ url: meta.url, title: meta.title, page, quality: Number(request.quality) || 0 })),
         cookies: await cookies(),
       });
       return { message: "已加入 " + result.added + " 个本地任务。可以关闭扩展窗口，桌面程序会继续下载。" };
@@ -333,9 +341,8 @@ async function handle(request, sender) {
       const selected = new Set((request.selectedBvids || []).map(String));
       const items = hasSelection ? allItems.filter(item => selected.has(item.bvid)) : allItems;
       if (!items.length) throw new Error("收藏夹为空。");
-      const config = await settings();
       const result = await localRequest("/tasks", {
-        tasks: items.map(item => ({ url: item.bvid, title: item.title, page: 1, quality: 0, all_pages: !!request.allPages, directory: config.directory || undefined })),
+        tasks: items.map(item => ({ url: item.bvid, title: item.title, page: 1, quality: 0, all_pages: !!request.allPages })),
         cookies: await cookies(),
       });
       return { message: "已加入 " + result.added + " 个收藏夹任务，详见桌面下载队列。" };

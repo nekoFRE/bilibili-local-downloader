@@ -82,13 +82,10 @@ $("download").addEventListener("click", () => busy("download", async () => {
 $("choose-dir").addEventListener("click", () => busy("choose-dir", async () => {
   status("请在桌面程序弹出的窗口中选择保存目录。");
   const result = await send({ action: "chooseDirectory" });
-  if (result.directory) $("directory").textContent = "保存目录：" + result.directory;
   status(result.directory ? "保存目录已更新。" : "已取消选择。");
 }));
 $("refresh").addEventListener("click", () => busy("refresh", async () => {
   const result = await send({ action: "status" });
-  const config = await chrome.storage.local.get(defaults);
-  $("directory").textContent = "保存目录：" + (config.directory || result.directory);
   const active = result.tasks.filter(task => !["已完成", "已跳过", "失败", "已取消", "已中断"].includes(task.status)).length;
   status("本机已连接 · " + active + " 个进行中的任务");
 }));
@@ -175,7 +172,6 @@ $("favorite-download").addEventListener("click", () => busy("favorite-download",
 }));
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.autoWake) { autoWake = changes.autoWake.newValue !== false; updateMode(); }
-  if (area === "local" && changes.directory) $("directory").textContent = "保存目录：" + (changes.directory.newValue || "桌面程序的默认目录");
   if (area === "local" && (changes.extensionEnabled || changes.floatingEnabled)) chrome.storage.local.get(defaults).then(applyFeatureState);
 });
 
@@ -184,7 +180,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   autoWake = config.autoWake !== false;
   applyFeatureState(config);
   document.querySelector('input[name="mode"][value="' + (config.mode === "browser" ? "browser" : "desktop") + '"]').checked = true;
-  $("directory").textContent = "保存目录：" + (config.directory || "桌面程序的默认目录");
   updateMode();
   if (config.extensionEnabled === false) return;
   const preset = new URLSearchParams(location.search).get("video");

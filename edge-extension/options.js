@@ -7,7 +7,6 @@ async function load() {
   $("auto-wake").checked = config.autoWake;
   $("extension-enabled").checked = config.extensionEnabled;
   $("floating-enabled").checked = config.floatingEnabled;
-  $("directory").textContent = "保存目录：" + (config.directory || "跟随桌面程序");
 }
 $("extension-enabled").addEventListener("change", async () => {
   await chrome.storage.local.set({ extensionEnabled: $("extension-enabled").checked });
@@ -49,5 +48,14 @@ $("sync-now").addEventListener("click", async () => {
   finally { $("sync-now").disabled = false; }
 });
 $("ask-save").addEventListener("change", () => chrome.storage.local.set({ askSave: $("ask-save").checked }));
-$("reset-dir").addEventListener("click", async () => { await chrome.storage.local.set({ directory: "" }); await load(); $("status").textContent = "扩展新任务将跟随桌面默认目录。"; });
+$("reset-dir").addEventListener("click", async () => {
+  $("reset-dir").disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ action: "status" });
+    if (!response?.ok) throw new Error(response?.error || "同步失败");
+    $("status").textContent = "已同步桌面目录，后续新任务使用：" + response.data.directory;
+    $("status").className = "";
+  } catch (error) { $("status").textContent = error.message; $("status").className = "error"; }
+  finally { $("reset-dir").disabled = false; }
+});
 load();
