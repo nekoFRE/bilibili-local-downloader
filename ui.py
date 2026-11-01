@@ -3,22 +3,26 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import OrderedDict
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
-from PySide6.QtCore import QEvent, QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtCore import QEvent, QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot, QUrl, QRect, QSize, QPoint
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap, QPainter, QColor, QPen, QFont, QPainterPath, QLinearGradient
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSystemTrayIcon,
     QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QGridLayout, QSlider, QSpinBox, QStyledItemDelegate,
 )
 
 from downloader import (
     APP_ROOT, RESOURCE_ROOT, QUALITY_NAMES, account_info, favorite_folders,
-    favorite_videos, ffmpeg_path, inspect_video, parse_cookies, merge_local_files,
+    favorite_page, ffmpeg_path, inspect_video, video_metadata, parse_cookies, merge_local_files,
 )
+from danmaku import DEFAULTS as DM_DEFAULTS, WEB_FIELDS, normalize_profile, resolve_profile
 from tasks import FINISHED
 
 
@@ -72,15 +76,390 @@ def card():
     return widget, layout
 
 
+class DanmakuPreview(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.profile = dict(DM_DEFAULTS)
+        self.setMinimumHeight(150)
+        self.setMaximumHeight(170)
+        self.setAccessibleName("弹幕样式示意，非最终视频预览")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        gradient = QLinearGradient(0, 0, self.width(), self.height())
+        gradient.setColorAt(0, QColor("#d5e3ec"))
+        gradient.setColorAt(1, QColor("#aabfcd"))
+        painter.setBrush(gradient)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(self.rect(), 9, 9)
+        p = self.profile
+        painter.setFont(QFont("Microsoft YaHei UI", max(9, round(p["font"] * .43)), QFont.Weight.DemiBold))
+        painter.setOpacity(p["opacity"] / 100)
+        for enabled, text, x, y in [(p["top"], "精彩的瞬间", .5, .18), (p["scroll"], "这段值得再看一遍", .07, .39), (p["bottom"], "下次一定", .5, .53 if p["area"] <= 50 else .77)]:
+            if enabled:
+                left = int(self.width() * x) - (painter.fontMetrics().horizontalAdvance(text) // 2 if x == .5 else 0)
+                painter.setPen(QColor("#667e90"))
+                painter.drawText(left + 1, int(self.height() * y) + 1, text)
+                painter.setPen(QColor("white"))
+                painter.drawText(left, int(self.height() * y), text)
+        painter.setOpacity(1)
+        painter.setFont(QFont("Microsoft YaHei UI", 9))
+        painter.setPen(QColor("#415c6f"))
+        if p["reserve"]:
+            y = int(self.height() * .85)
+            painter.setPen(QPen(QColor("#8399ac"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(0, y, self.width(), y)
+            painter.drawText(self.rect().adjusted(8, y, -8, -4), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, "字幕留白区")
+        painter.setPen(QColor("#415c6f"))
+        painter.drawText(10, self.height() - 9, "样式示意 · 示例弹幕")
+
+
+class DanmakuDialog(QDialog):
+    def __init__(self, profile, manager, parent):
+        super().__init__(parent)
+        self.manager = manager
+        self.reference = manager.danmaku_reference
+        self.profile = resolve_profile(profile, self.reference)
+        self.controls, self.outputs = {}, {}
+        self.setWindowTitle("弹幕设置与预览")
+        self.resize(560, 720)
+        self.setStyleSheet("QDialog, QDialog QWidget {background:#fff;} QLabel, QCheckBox {background:transparent;} QLabel#badge {background:#e5f6fc;color:#1685ad;border-radius:12px;padding:6px 12px;} QLabel#dmIsolation {background:#eaf7fc;color:#0086b0;border-radius:7px;padding:9px;} QPushButton#primary {background:#00a2d6;color:white;border-color:#00a2d6;}")
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setSpacing(12)
+        row = QHBoxLayout()
+        self.follow = QCheckBox("跟随网页设置")
+        self.follow.toggled.connect(self.set_follow)
+        row.addWidget(self.follow)
+        row.addStretch()
+        self.source = label("", "badge")
+        self.source.setWordWrap(False)
+        row.addWidget(self.source)
+        layout.addLayout(row)
+        layout.addWidget(label("这里的修改仅影响下载，不会修改B站网页。", "dmIsolation"))
+        self.web_reference = label("", "muted")
+        layout.addWidget(self.web_reference)
+        reference_button = button("采用扩展最新参考", self.update_reference)
+        reference_button.setToolTip("先在Edge扩展中读取当前视频页设置；桌面端使用扩展最近传来的只读参考。")
+        layout.addWidget(reference_button)
+        self.preview = DanmakuPreview()
+        layout.addWidget(self.preview)
+        grid = QGridLayout()
+        for index, (key, title, low, high, unit) in enumerate([("font", "字号", 16, 48, ""), ("opacity", "不透明度", 10, 100, "%"), ("duration", "单条滚动时长", 4, 20, " 秒")]):
+            group = QVBoxLayout()
+            head = QHBoxLayout()
+            head.addWidget(label(title))
+            output = label("")
+            head.addStretch()
+            head.addWidget(output)
+            group.addLayout(head)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(low, high)
+            slider.valueChanged.connect(lambda value, key=key: self.change(key, value))
+            group.addWidget(slider)
+            self.controls[key], self.outputs[key] = slider, (output, unit)
+            grid.addLayout(group, index // 2, index % 2)
+        group = QVBoxLayout()
+        group.addWidget(label("显示区域"))
+        area = QComboBox()
+        for value, text in [(25, "上1/4屏"), (50, "上半屏"), (75, "上3/4屏"), (100, "全屏")]:
+            area.addItem(text, value)
+        area.currentIndexChanged.connect(lambda _: self.change("area", area.currentData()))
+        self.controls["area"] = area
+        group.addWidget(area)
+        grid.addLayout(group, 1, 1)
+        layout.addLayout(grid)
+        advanced = QWidget()
+        advanced_layout = QVBoxLayout(advanced)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        for key, title in [("scroll", "滚动"), ("top", "顶部"), ("bottom", "底部"), ("reserve", "字幕留白")]:
+            control = QCheckBox(title)
+            control.toggled.connect(lambda value, key=key: self.change(key, value))
+            self.controls[key] = control
+            row.addWidget(control)
+        advanced_layout.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(label("每10秒最多弹幕条数"))
+        density = QSpinBox()
+        density.setRange(10, 200)
+        density.valueChanged.connect(lambda value: self.change("density", value))
+        self.controls["density"] = density
+        row.addWidget(density)
+        advanced_layout.addLayout(row)
+        advanced_layout.addWidget(label("屏蔽关键词（逗号或换行分隔）", "muted"))
+        keywords = QPlainTextEdit()
+        keywords.setMaximumHeight(65)
+        keywords.textChanged.connect(lambda: self.change("keywords", keywords.toPlainText()[:2000]))
+        self.controls["keywords"] = keywords
+        advanced_layout.addWidget(keywords)
+        for key, title in [("save_ass", "额外保存ASS弹幕文件"), ("keep_original", "同时保留普通原视频")]:
+            control = QCheckBox(title)
+            control.toggled.connect(lambda value, key=key: self.change(key, value))
+            self.controls[key] = control
+            advanced_layout.addWidget(control)
+        advanced.hide()
+        layout.addWidget(button("更多设置", lambda: advanced.setVisible(not advanced.isVisible())))
+        layout.addWidget(advanced)
+        layout.addWidget(label("未读取的项目采用下载器默认值。智能防遮挡、BAS等特殊效果暂不支持。滚动时长越大，速度越慢。", "muted"))
+        layout.addWidget(label("弹幕版需要重新编码，耗时更长；写入画面后无法单独关闭。ASS文件可由兼容播放器单独加载。", "muted"))
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Apply)
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setText("应用到下载")
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setObjectName("primary")
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self.accept)
+        outer.addWidget(buttons)
+        self.render()
+
+    def update_reference(self):
+        self.reference = self.manager.danmaku_reference
+        self.profile = resolve_profile(self.profile, self.reference)
+        self.render()
+
+    def set_follow(self, checked):
+        self.profile["source"] = "web" if checked else "custom"
+        if checked:
+            base = dict(self.profile)
+            for key in WEB_FIELDS:
+                base[key] = DM_DEFAULTS[key]
+            self.profile = resolve_profile(base, self.reference)
+        self.render()
+
+    def change(self, key, value):
+        self.profile.update({key: value, "source": "custom"})
+        self.profile = normalize_profile(self.profile)
+        self.render()
+
+    def render(self):
+        self.follow.blockSignals(True)
+        self.follow.setChecked(self.profile["source"] == "web")
+        self.follow.blockSignals(False)
+        self.source.setText("已自定义 · 仅影响下载" if self.profile["source"] == "custom" else "跟随网页" if self.reference else "采用下载器默认值")
+        names = {"font": "字号", "opacity": "不透明度", "area": "显示区域", "duration": "滚动秒数", "scroll": "滚动", "top": "顶部", "bottom": "底部", "reserve": "字幕留白"}
+        if self.reference:
+            values = self.reference["values"]
+            text = " · ".join(names[key] + " " + (("开" if values[key] else "关") if isinstance(values[key], bool) else str(values[key]) + ("%" if key in {"opacity", "area"} else "")) for key in self.reference["fields"])
+            text += "；其余项目未读取，使用默认值。" if len(self.reference["fields"]) < len(WEB_FIELDS) else ""
+        else:
+            text = "尚未收到网页设置。请打开Edge扩展读取当前视频页；这里使用下载器默认值，不会修改网页。"
+        self.web_reference.setText("网页参考 · 扩展最近读取 · 只读\n" + text)
+        for key, control in self.controls.items():
+            control.blockSignals(True)
+            value = self.profile[key]
+            if isinstance(control, QCheckBox):
+                control.setChecked(value)
+            elif isinstance(control, QComboBox):
+                control.setCurrentIndex(control.findData(value))
+            elif isinstance(control, QPlainTextEdit):
+                if control.toPlainText() != value:
+                    control.setPlainText(value)
+            else:
+                control.setValue(value)
+            control.blockSignals(False)
+        for key, (output, unit) in self.outputs.items():
+            output.setText(str(self.profile[key]) + unit)
+        self.preview.profile = self.profile
+        self.preview.update()
+
+
+class FavoriteGrid(QListWidget):
+    viewportChanged = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.display_mode = "card"
+        self.setViewMode(QListWidget.ViewMode.IconMode)
+        self.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.setMovement(QListWidget.Movement.Static)
+        self.setUniformItemSizes(True)
+        self.setWrapping(True)
+        self.setDragEnabled(False)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setStyleSheet("QListWidget {background:#f7f9fc;border:0;} QListWidget::item {padding:0;border:0;}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reflow()
+
+    def set_display_mode(self, mode):
+        self.display_mode = "list" if mode == "list" else "card"
+        self.reflow()
+        self.doItemsLayout()
+
+    def reflow(self):
+        width = max(1, self.viewport().width())
+        if self.display_mode == "list":
+            self.setGridSize(QSize(width, 52))
+            self.viewportChanged.emit()
+            return
+        columns = max(2, min(5, width // 220))
+        cell = width // columns
+        self.setGridSize(QSize(cell, int((cell - 10) * 9 / 16) + 90))
+        self.viewportChanged.emit()
+
+
+class FavoriteDelegate(QStyledItemDelegate):
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.check_icon = QIcon(str(RESOURCE_ROOT / "assets" / "check.svg"))
+
+    def sizeHint(self, option, index):
+        return self.owner.favorite_list.gridSize()
+
+    def paint(self, painter, option, index):
+        video = index.data(Qt.ItemDataRole.UserRole)
+        if not video:
+            return
+        if self.owner.favorite_list.display_mode == "list":
+            self.paint_list(painter, option, index, video)
+            return
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = option.rect.adjusted(4, 4, -4, -4)
+        checked = index.data(Qt.ItemDataRole.CheckStateRole) in (Qt.CheckState.Checked, Qt.CheckState.Checked.value)
+        painter.setPen(QPen(QColor("#009bcc" if checked else "#e0e7ef"), 2 if checked else 1))
+        painter.setBrush(QColor("white"))
+        painter.drawRoundedRect(r, 9, 9)
+        cover = QRect(r.x() + 1, r.y() + 1, r.width() - 2, int((r.width() - 2) * 9 / 16))
+        painter.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(r, 9, 9)
+        painter.setClipPath(clip)
+        painter.fillRect(cover, QColor("#e6edf4"))
+        url = video.get("thumbnail", "")
+        pixmap = self.owner.favorite_covers.get(url)
+        if pixmap is not None:
+            self.owner.favorite_covers.move_to_end(url)
+            scaled = pixmap.scaled(cover.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            painter.drawPixmap(cover, scaled, QRect((scaled.width() - cover.width()) // 2, (scaled.height() - cover.height()) // 2, cover.width(), cover.height()))
+        else:
+            painter.setPen(QColor("#8998ac"))
+            painter.drawText(cover, Qt.AlignmentFlag.AlignCenter, "已失效" if not video["available"] else "暂无封面 · 右键重试" if url in self.owner.favorite_cover_errors else "封面加载中" if url else "暂无封面")
+        painter.restore()
+
+        if not video["available"]:
+            painter.setOpacity(.5)
+        indicator = QRect(r.x() + 9, r.y() + 9, 17, 17)
+        painter.setBrush(QColor("#00a2d6" if checked else "#ffffff"))
+        painter.setPen(QPen(QColor("#00a2d6" if checked else "#c7d3e2"), 1))
+        painter.drawRoundedRect(indicator, 4, 4)
+        if checked:
+            self.check_icon.paint(painter, indicator)
+        painter.setFont(QFont("Microsoft YaHei UI", 8))
+        time = duration(video.get("duration"))
+        text_width = painter.fontMetrics().horizontalAdvance(time) + 10
+        time_rect = QRect(cover.right() - text_width - 5, cover.bottom() - 22, text_width, 18)
+        painter.fillRect(time_rect, QColor(37, 48, 71, 190))
+        painter.setPen(QColor("white"))
+        painter.drawText(time_rect, Qt.AlignmentFlag.AlignCenter, time)
+        painter.setFont(QFont("Microsoft YaHei UI", 9))
+        painter.setPen(QColor("#253047"))
+        text = str(video["title"]).replace("\n", " ")
+        available_width = r.width() - 18
+        metrics = painter.fontMetrics()
+        split = 0
+        while split < len(text) and metrics.horizontalAdvance(text[:split + 1]) <= available_width:
+            split += 1
+        title = text[:split] + ("\n" + metrics.elidedText(text[split:], Qt.TextElideMode.ElideRight, available_width) if split < len(text) else "")
+        painter.drawText(QRect(r.x() + 9, cover.bottom() + 7, available_width, 42), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, title)
+        painter.setFont(QFont("Microsoft YaHei UI", 8))
+        painter.setPen(QColor("#7b879b"))
+        painter.drawText(QRect(r.x() + 9, r.bottom() - 25, r.width() - 90, 19), Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(video.get("author") or video.get("bvid", ""), Qt.TextElideMode.ElideRight, max(0, r.width() - 90)))
+        pages = self.owner.favorite_parts.get(video.get("bvid"))
+        text = f"已选 {len(pages)}P" if pages else "选择分P" if video["available"] else "已失效"
+        painter.setPen(QColor("#0086b0" if video["available"] else "#8998ac"))
+        painter.drawText(QRect(r.right() - 78, r.bottom() - 25, 70, 19), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, text)
+        painter.restore()
+
+    def paint_list(self, painter, option, index, video):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = option.rect.adjusted(4, 3, -4, -3)
+        checked = index.data(Qt.ItemDataRole.CheckStateRole) in (Qt.CheckState.Checked, Qt.CheckState.Checked.value)
+        painter.setPen(QPen(QColor("#009bcc" if checked else "#e0e7ef"), 1))
+        painter.setBrush(QColor("#eff9fd" if checked else "#ffffff"))
+        painter.drawRoundedRect(r, 7, 7)
+        if not video["available"]:
+            painter.setOpacity(.5)
+        indicator = QRect(r.x() + 9, r.center().y() - 8, 17, 17)
+        painter.setBrush(QColor("#00a2d6" if checked else "#ffffff"))
+        painter.setPen(QColor("#00a2d6" if checked else "#c7d3e2"))
+        painter.drawRoundedRect(indicator, 4, 4)
+        if checked:
+            self.check_icon.paint(painter, indicator)
+        cover = QRect(r.x() + 35, r.y() + 5, 64, 36)
+        painter.fillRect(cover, QColor("#e6edf4"))
+        pixmap = self.owner.favorite_covers.get(video.get("thumbnail", ""))
+        if pixmap is not None:
+            painter.drawPixmap(cover, pixmap)
+            self.owner.favorite_covers.move_to_end(video["thumbnail"])
+        left, room = r.x() + 110, max(20, r.width() - 265)
+        painter.setFont(QFont("Microsoft YaHei UI", 9))
+        painter.setPen(QColor("#253047"))
+        painter.drawText(QRect(left, r.y() + 4, room, 20), Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(video["title"], Qt.TextElideMode.ElideRight, room))
+        painter.setFont(QFont("Microsoft YaHei UI", 8))
+        painter.setPen(QColor("#7b879b"))
+        meta = (video.get("author") or "") + " · " + video.get("bvid", "")
+        painter.drawText(QRect(left, r.y() + 24, room, 17), Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, room))
+        painter.drawText(QRect(r.right() - 145, r.y(), 58, r.height()), Qt.AlignmentFlag.AlignCenter, duration(video.get("duration")))
+        painter.setPen(QColor("#0086b0" if video["available"] else "#8998ac"))
+        pages = self.owner.favorite_parts.get(video.get("bvid"))
+        text = f"已选 {len(pages)}P" if pages else "选择分P" if video["available"] else "已失效"
+        painter.drawText(QRect(r.right() - 80, r.y(), 70, r.height()), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, text)
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        video = index.data(Qt.ItemDataRole.UserRole)
+        if not video or not video["available"]:
+            return False
+        click = event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton
+        key = event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space
+        if click and event.position().x() > option.rect.right() - 88 and event.position().y() > option.rect.bottom() - 35:
+            self.owner.open_favorite_parts(video)
+            return True
+        if click or key:
+            current = index.data(Qt.ItemDataRole.CheckStateRole)
+            model.setData(index, Qt.CheckState.Unchecked.value if current in (Qt.CheckState.Checked, Qt.CheckState.Checked.value) else Qt.CheckState.Checked.value, Qt.ItemDataRole.CheckStateRole)
+            return True
+        return False
+
+
 class MainWindow(QMainWindow):
     def __init__(self, settings, manager, bridge):
         super().__init__()
         self.settings, self.manager, self.bridge = settings, manager, bridge
         self.meta = None
         self.favorites = []
+        self.favorite_folder_id = None
+        self.favorite_states, self.favorite_nodes = {}, {}
+        self.favorite_selected, self.favorite_parts = set(), {}
+        self.favorite_next_page, self.favorite_total = 1, 0
+        self.favorite_has_more, self.favorite_loading = False, False
+        self.favorite_scan, self.favorite_generation = None, 0
+        self.favorite_covers = OrderedDict()
+        self.favorite_cover_errors, self.favorite_cover_pending = set(), set()
+        try:
+            self.danmaku_profile = normalize_profile(settings.values.get("danmaku"))
+        except ValueError:
+            self.danmaku_profile = dict(DM_DEFAULTS)
+            settings.error += " 弹幕设置无效，已使用默认值，原设置文件已保留。"
+        self.danmaku_rows, self.danmaku_revision = [], -1
         self.jobs, self.job_id = {}, 0
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(3)
+        self.thumbnail_pool = QThreadPool(self)
+        self.thumbnail_pool.setMaxThreadCount(3)
+        self.favorite_image_timer = QTimer(self)
+        self.favorite_image_timer.setSingleShot(True)
+        self.favorite_image_timer.timeout.connect(self.load_visible_covers)
         self.exiting = False
         self.tray_notice_shown = False
         self.setWindowTitle("B站视频下载器")
@@ -120,6 +499,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.build_download_page(), "视频下载")
         self.tabs.addTab(self.build_favorites_page(), "收藏夹")
         self.tabs.addTab(self.build_settings_page(), "设置与连接")
+        self.tabs.currentChanged.connect(lambda _: self.schedule_favorite_images())
         outer.addWidget(self.tabs, 1)
         self.notice = label("准备好了，粘贴一个视频链接开始。", "muted")
         outer.addWidget(self.notice)
@@ -185,6 +565,7 @@ class MainWindow(QMainWindow):
         self.pages.setMaximumHeight(112)
         self.pages.setVisible(False)
         content.addWidget(self.pages)
+        content.addWidget(self.build_danmaku_entry())
         layout.addWidget(input_card)
         queue_card, queue_layout = card()
         row = QHBoxLayout()
@@ -220,36 +601,131 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(0, 16, 0, 0)
         content_card, content = card()
-        content.addWidget(label("从收藏夹批量保存", "sectionTitle"))
-        content.addWidget(label("导入登录Cookie，或使用Edge扩展登录浏览器下载。", "muted"))
+        content.setSpacing(8)
         row = QHBoxLayout()
+        row.addWidget(label("收藏夹 · 浏览并选择", "sectionTitle"))
         self.folder_combo = QComboBox()
+        self.folder_combo.addItem("选择收藏夹", None)
+        self.folder_combo.currentIndexChanged.connect(self.change_favorite_folder)
         self.folder_combo.setMinimumWidth(220)
         row.addWidget(self.folder_combo, 1)
-        self.load_folders_button = button("加载收藏夹", self.load_folders, True)
+        self.favorite_view_buttons = {}
+        view_mode = self.settings.values.get("favorite_view", "card")
+        for mode, title in [("card", "卡片"), ("list", "列表")]:
+            control = button(title, lambda _, mode=mode: self.set_favorite_view(mode))
+            control.setObjectName("viewMode")
+            control.setCheckable(True)
+            control.setChecked(mode == view_mode)
+            self.favorite_view_buttons[mode] = control
+            row.addWidget(control)
+        self.load_folders_button = button("刷新收藏夹", self.load_folders)
         row.addWidget(self.load_folders_button)
-        self.load_videos_button = button("读取视频", self.load_favorites)
-        row.addWidget(self.load_videos_button)
         content.addLayout(row)
-        self.favorite_search = QLineEdit()
-        self.favorite_search.setPlaceholderText("按标题或UP主筛选")
-        self.favorite_search.textChanged.connect(self.filter_favorites)
-        content.addWidget(self.favorite_search)
-        content.addWidget(label("高级选项：按标题或UP主筛选后，可逐条勾选要下载的视频。", "muted"))
-        self.favorite_list = QListWidget()
-        content.addWidget(self.favorite_list, 1)
         row = QHBoxLayout()
-        row.addWidget(button("全选当前列表", lambda: self.select_items(self.favorite_list, True, visible_only=True)))
-        row.addWidget(button("取消全部选择", lambda: self.select_items(self.favorite_list, False)))
-        self.favorite_all_pages = QCheckBox("下载所有分P")
+        self.favorite_search = QLineEdit()
+        self.favorite_search.setPlaceholderText("筛选已加载视频：标题 / UP主 / BV号")
+        self.favorite_search.textChanged.connect(self.filter_favorites)
+        row.addWidget(self.favorite_search, 1)
+        self.favorite_search_all = button("搜索整个收藏夹", lambda: self.scan_favorites("search"))
+        row.addWidget(self.favorite_search_all)
+        self.favorite_stop = button("停止读取", self.stop_favorite_scan)
+        self.favorite_stop.hide()
+        row.addWidget(self.favorite_stop)
+        content.addLayout(row)
+        row = QHBoxLayout()
+        self.favorite_count = label("选择收藏夹后，视频会分批显示。", "muted")
+        row.addWidget(self.favorite_count, 1)
+        self.favorite_select_visible = button("全选已加载", self.select_visible_favorites)
+        row.addWidget(self.favorite_select_visible)
+        row.addWidget(button("取消全部选择", self.clear_favorite_selection))
+        self.favorite_select_whole = button("选择整个收藏夹", lambda: self.scan_favorites("select"))
+        row.addWidget(self.favorite_select_whole)
+        content.addLayout(row)
+        self.favorite_list = FavoriteGrid()
+        self.favorite_list.set_display_mode(view_mode)
+        self.favorite_list.setItemDelegate(FavoriteDelegate(self))
+        self.favorite_list.itemChanged.connect(self.favorite_selection_changed)
+        self.favorite_list.viewportChanged.connect(self.schedule_favorite_images)
+        self.favorite_list.verticalScrollBar().valueChanged.connect(self.favorite_scrolled)
+        self.favorite_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.favorite_list.customContextMenuRequested.connect(self.favorite_context_menu)
+        content.addWidget(self.favorite_list, 1)
+        self.favorite_more = button("继续加载", self.load_favorites)
+        self.favorite_more.setEnabled(False)
+        self.favorite_settings = QWidget()
+        settings_layout = QVBoxLayout(self.favorite_settings)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        row.addWidget(label("画质"))
+        self.favorite_quality = QComboBox()
+        self.favorite_quality.addItem("跟随默认画质", -1)
+        for value, title in QUALITY_NAMES.items():
+            self.favorite_quality.addItem(title, value)
+        row.addWidget(self.favorite_quality)
+        self.favorite_all_pages = QCheckBox("下载全部分P（单条选择优先）")
         self.favorite_all_pages.setChecked(True)
+        self.favorite_all_pages.toggled.connect(self.update_favorite_count)
         row.addWidget(self.favorite_all_pages)
         row.addStretch()
-        row.addWidget(button("加入下载队列", self.add_favorites, True))
+        settings_layout.addLayout(row)
+        settings_layout.addWidget(self.build_danmaku_entry())
+        self.favorite_settings.hide()
+        content.addWidget(self.favorite_settings)
+        row = QHBoxLayout()
+        row.addWidget(button("本次下载设置", lambda: self.favorite_settings.setVisible(not self.favorite_settings.isVisible())))
+        row.addWidget(self.favorite_more)
+        self.favorite_summary = label("全部分P · 普通MP4", "muted")
+        row.addWidget(self.favorite_summary, 1)
+        self.favorite_add_button = button("加入下载队列（0）", self.add_favorites, True)
+        self.favorite_add_button.setEnabled(False)
+        row.addWidget(self.favorite_add_button)
         content.addLayout(row)
-        content.addWidget(label("收藏夹任务使用设置中的默认画质。失效视频会标记失败，其他任务继续下载。", "muted"))
+        content.addWidget(label("保存目录使用上方当前目录，入队时固定。默认不勾选；已知失效视频会置灰。右键卡片可重试封面或选择分P。", "muted"))
         layout.addWidget(content_card, 1)
         return widget
+
+    def build_danmaku_entry(self):
+        widget = QWidget()
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        enabled = QCheckBox("带弹幕")
+        enabled.setChecked(self.danmaku_profile["enabled"])
+        enabled.toggled.connect(self.set_danmaku_enabled)
+        hint = label("未读取网页 · 采用默认", "muted")
+        row.addWidget(enabled)
+        row.addWidget(hint, 1)
+        row.addWidget(button("设置与预览", self.edit_danmaku))
+        self.danmaku_rows.append((enabled, hint))
+        return widget
+
+    def set_danmaku_enabled(self, enabled):
+        self.danmaku_profile["enabled"] = enabled
+        self.settings.set("danmaku", self.danmaku_profile)
+        self.update_danmaku_rows()
+
+    def update_danmaku_rows(self):
+        for checkbox, hint in self.danmaku_rows:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(self.danmaku_profile["enabled"])
+            checkbox.blockSignals(False)
+            hint.setText("已自定义 · 仅影响下载" if self.danmaku_profile["source"] == "custom" else "跟随网页 · 仅影响下载" if self.manager.danmaku_reference else "未读取网页 · 采用默认")
+        if hasattr(self, "favorite_summary"):
+            self.update_favorite_count()
+
+    def edit_danmaku(self):
+        dialog = DanmakuDialog(self.danmaku_profile, self.manager, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.danmaku_profile = normalize_profile(dialog.profile)
+            self.settings.set("danmaku", self.danmaku_profile)
+            self.update_danmaku_rows()
+        dialog.deleteLater()
+
+    def danmaku_snapshot(self):
+        profile = dict(self.danmaku_profile)
+        if profile["source"] == "web":
+            for key in WEB_FIELDS:
+                profile[key] = DM_DEFAULTS[key]
+        return resolve_profile(profile, self.manager.danmaku_reference)
 
     def build_settings_page(self):
         scroll = QScrollArea()
@@ -322,14 +798,14 @@ class MainWindow(QMainWindow):
         scroll.setWidget(widget)
         return scroll
 
-    def async_job(self, function, success, error=None):
+    def async_job(self, function, success, error=None, pool=None):
         self.job_id += 1
         job_id = self.job_id
         worker = Worker(job_id, function)
         self.jobs[job_id] = (worker, success, error)
         worker.signals.success.connect(self.job_success, Qt.ConnectionType.QueuedConnection)
         worker.signals.error.connect(self.job_error, Qt.ConnectionType.QueuedConnection)
-        self.pool.start(worker)
+        (pool or self.pool).start(worker)
 
     @Slot(int, object)
     def job_success(self, job_id, value):
@@ -418,8 +894,12 @@ class MainWindow(QMainWindow):
         if not selected:
             self.notice.setText("请至少选择一个分P。")
             return
-        specs = [{"url": self.meta["url"], "page": p, "title": self.meta["title"], "quality": self.quality.currentData(), "directory": self.directory.text()} for p in selected]
-        ids = self.manager.add(specs)
+        profile = self.danmaku_snapshot()
+        if profile["enabled"] and self.quality.currentData() in {125, 126}:
+            self.notice.setText("弹幕版暂不支持HDR和杜比视界，请选择普通SDR画质。")
+            return
+        specs = [{"url": self.meta["url"], "page": p, "title": self.meta["title"], "quality": self.quality.currentData(), "directory": self.directory.text(), "danmaku": profile} for p in selected]
+        ids = self.enqueue_specs(specs)
         self.notice.setText(f"已加入 {len(ids)} 个任务；重复的任务或已完成文件会跳过。")
         self.refresh()
 
@@ -451,6 +931,9 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def refresh(self, *_):
+        if self.manager.danmaku_revision != self.danmaku_revision:
+            self.danmaku_revision = self.manager.danmaku_revision
+            self.update_danmaku_rows()
         try:
             login = self.manager.login_updates.get_nowait()
             if login["revision"] == self.manager.login_revision:
@@ -615,62 +1098,335 @@ class MainWindow(QMainWindow):
         cookies = dict(self.manager.cookies)
         def success(folders):
             self.load_folders_button.setEnabled(True)
+            previous = self.favorite_folder_id
+            self.folder_combo.blockSignals(True)
             self.folder_combo.clear()
+            self.folder_combo.addItem("选择收藏夹", None)
             for folder in folders:
                 self.folder_combo.addItem(f'{folder["title"]} · {folder.get("media_count", 0)} 个', folder["id"])
+            index = self.folder_combo.findData(previous)
+            self.folder_combo.setCurrentIndex(max(0, index))
+            self.folder_combo.blockSignals(False)
+            if self.folder_combo.currentData() != previous:
+                self.change_favorite_folder()
             self.notice.setText(f"已加载 {len(folders)} 个收藏夹。")
         def error(message):
             self.load_folders_button.setEnabled(True)
             self.notice.setText(message)
         self.async_job(lambda: favorite_folders(cookies), success, error)
 
+    def change_favorite_folder(self, *_):
+        if self.favorite_folder_id:
+            self.favorite_states[self.favorite_folder_id] = {"items": self.favorites, "selected": set(self.favorite_selected), "parts": dict(self.favorite_parts), "next": self.favorite_next_page, "more": self.favorite_has_more, "total": self.favorite_total, "query": self.favorite_search.text(), "scroll": self.favorite_list.verticalScrollBar().value()}
+        self.favorite_generation += 1
+        self.favorite_scan, self.favorite_loading = None, False
+        self.favorite_page_error = False
+        self.favorite_folder_id = self.folder_combo.currentData()
+        state = self.favorite_states.get(self.favorite_folder_id, {})
+        self.favorites = state.get("items", [])
+        self.favorite_selected, self.favorite_parts = set(state.get("selected", [])), dict(state.get("parts", {}))
+        self.favorite_next_page, self.favorite_total = state.get("next", 1), state.get("total", 0)
+        self.favorite_has_more = state.get("more", bool(self.favorite_folder_id))
+        self.favorite_nodes.clear()
+        self.favorite_list.clear()
+        self.favorite_search.blockSignals(True)
+        self.favorite_search.setText(state.get("query", ""))
+        self.favorite_search.blockSignals(False)
+        self.render_favorites()
+        QTimer.singleShot(0, lambda value=state.get("scroll", 0): self.favorite_list.verticalScrollBar().setValue(value))
+        if self.favorite_folder_id and not self.favorites:
+            self.load_favorites()
+
+    def set_favorite_view(self, mode):
+        mode = "list" if mode == "list" else "card"
+        anchor = self.favorite_list.itemAt(QPoint(12, 12))
+        if anchor is None:
+            anchor = next((self.favorite_list.item(i) for i in range(self.favorite_list.count()) if not self.favorite_list.item(i).isHidden()), None)
+        self.favorite_list.set_display_mode(mode)
+        for key, control in self.favorite_view_buttons.items():
+            control.setChecked(key == mode)
+        self.settings.set("favorite_view", mode)
+        if anchor:
+            generation = self.favorite_generation
+            QTimer.singleShot(0, lambda: self.favorite_list.scrollToItem(anchor, QAbstractItemView.ScrollHint.PositionAtTop) if generation == self.favorite_generation else None)
+        self.schedule_favorite_images()
+
+    @staticmethod
+    def thumbnail_url(url):
+        parsed = urlparse(url or "")
+        if parsed.scheme not in {"http", "https"} or not (parsed.hostname or "").endswith(".hdslb.com"):
+            return ""
+        return url.replace("http://", "https://", 1) + ("@320w_180h_1c.webp" if not parsed.query and "@" not in parsed.path else "")
+
     def load_favorites(self):
-        folder_id = self.folder_combo.currentData()
-        if not folder_id:
-            self.notice.setText("请先加载并选择收藏夹。")
+        if not self.favorite_folder_id or self.favorite_loading or not self.favorite_has_more:
             return
-        self.load_videos_button.setEnabled(False)
-        self.notice.setText("正在读取收藏夹中的视频…")
+        folder_id, generation, page = self.favorite_folder_id, self.favorite_generation, self.favorite_next_page
+        self.favorite_loading, self.favorite_page_error = True, False
+        self.update_favorite_count()
         cookies = dict(self.manager.cookies)
-        def success(videos):
-            self.load_videos_button.setEnabled(True)
-            self.favorites = videos
-            self.favorite_list.clear()
-            for video in videos:
-                item = QListWidgetItem(f'{video["title"]}  ·  {video["author"]}  ·  {duration(video["duration"])}')
-                item.setData(Qt.ItemDataRole.UserRole, video)
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(Qt.CheckState.Unchecked)
-                self.favorite_list.addItem(item)
-            self.filter_favorites()
-            self.notice.setText(f"已读取 {len(videos)} 个视频，勾选要保存的内容。")
+        def success(data):
+            if generation != self.favorite_generation:
+                return
+            self.favorite_loading = False
+            known = {video["key"] for video in self.favorites}
+            for video in data["items"]:
+                if video["key"] not in known:
+                    video["thumbnail"] = self.thumbnail_url(video.get("cover"))
+                    self.favorites.append(video)
+                    known.add(video["key"])
+            self.favorite_next_page = data["page"] + 1
+            self.favorite_has_more = data["has_more"]
+            self.favorite_total = data["total"] or max(self.favorite_total, len(self.favorites))
+            self.render_favorites()
+            if self.favorite_scan:
+                QTimer.singleShot(160, lambda: self.continue_favorite_scan(generation))
         def error(message):
-            self.load_videos_button.setEnabled(True)
-            self.notice.setText(message)
-        self.async_job(lambda: favorite_videos(folder_id, cookies), success, error)
+            if generation == self.favorite_generation:
+                self.favorite_loading, self.favorite_page_error, self.favorite_scan = False, True, None
+                self.update_favorite_count()
+                self.notice.setText(message + " 可点击“重试读取”。")
+        self.async_job(lambda: favorite_page(folder_id, cookies, page), success, error)
+
+    def render_favorites(self):
+        self.favorite_list.blockSignals(True)
+        for video in self.favorites:
+            item = self.favorite_nodes.get(video["key"])
+            if item is None:
+                item = QListWidgetItem(video["title"])
+                item.setData(Qt.ItemDataRole.UserRole, video)
+                item.setToolTip(video["title"] + "\n" + (video.get("author") or "") + "\n" + video.get("bvid", ""))
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                if not video["available"]:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+                self.favorite_list.addItem(item)
+                self.favorite_nodes[video["key"]] = item
+            item.setCheckState(Qt.CheckState.Checked if video["bvid"] in self.favorite_selected else Qt.CheckState.Unchecked)
+        self.favorite_list.blockSignals(False)
+        self.filter_favorites()
 
     def filter_favorites(self, *_):
         term = self.favorite_search.text().strip().lower()
         for i in range(self.favorite_list.count()):
             item = self.favorite_list.item(i)
-            item.setHidden(term not in item.text().lower())
+            video = item.data(Qt.ItemDataRole.UserRole)
+            item.setHidden(bool(term and term not in (video["title"] + " " + video.get("author", "") + " " + video.get("bvid", "")).lower()))
+        self.update_favorite_count()
+        self.schedule_favorite_images()
 
-    def add_favorites(self):
-        specs = []
+    def favorite_selection_changed(self, item):
+        video = item.data(Qt.ItemDataRole.UserRole)
+        if item.checkState() == Qt.CheckState.Checked and video["available"]:
+            self.favorite_selected.add(video["bvid"])
+        else:
+            self.favorite_selected.discard(video["bvid"])
+        self.update_favorite_count()
+
+    def update_favorite_count(self, *_):
+        query = self.favorite_search.text().strip()
+        matched = sum(not self.favorite_list.item(i).isHidden() for i in range(self.favorite_list.count()))
+        text = f"已加载 {len(self.favorites)} / {self.favorite_total or '—'} 个 · 已选 {len(self.favorite_selected)} 个"
+        if query:
+            text += f" · 匹配 {matched} 个"
+        text += " · 正在读取完整清单…" if self.favorite_scan else " · 加载中…" if self.favorite_loading else ""
+        self.favorite_count.setText(text)
+        self.favorite_select_visible.setText("全选匹配结果" if query else "全选已加载")
+        self.favorite_add_button.setText(f"加入下载队列（{len(self.favorite_selected)}）")
+        self.favorite_add_button.setEnabled(bool(self.favorite_selected) and not getattr(self, "favorite_submitting", False))
+        self.favorite_more.setEnabled(bool(self.favorite_folder_id) and self.favorite_has_more and not self.favorite_loading and not self.favorite_scan)
+        self.favorite_more.setText("重试读取" if getattr(self, "favorite_page_error", False) else "加载中…" if self.favorite_loading else "继续加载" if self.favorite_has_more else "已加载全部")
+        for control in (self.favorite_select_whole, self.favorite_search_all):
+            control.setEnabled(bool(self.favorite_folder_id) and not self.favorite_scan)
+        self.favorite_stop.setVisible(bool(self.favorite_scan))
+        self.favorite_summary.setText(("全部分P" if self.favorite_all_pages.isChecked() else "默认P1") + (" · 弹幕版（仅影响下载）" if self.danmaku_profile["enabled"] else " · 普通MP4"))
+
+    def select_visible_favorites(self):
         for i in range(self.favorite_list.count()):
             item = self.favorite_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                video = item.data(Qt.ItemDataRole.UserRole)
-                specs.append({"url": video["bvid"], "page": 1, "title": video["title"], "directory": self.directory.text(), "quality": self.default_quality.currentData(), "all_pages": self.favorite_all_pages.isChecked()})
-        if not specs:
-            self.notice.setText("请先勾选要下载的视频。")
+            video = item.data(Qt.ItemDataRole.UserRole)
+            if not item.isHidden() and video["available"]:
+                self.favorite_selected.add(video["bvid"])
+        self.render_favorites()
+
+    def clear_favorite_selection(self):
+        self.favorite_selected.clear()
+        self.render_favorites()
+
+    def scan_favorites(self, goal):
+        if not self.favorite_folder_id or self.favorite_scan:
             return
-        try:
-            ids = self.manager.add(specs)
-            self.notice.setText(f"已加入 {len(ids)} 个收藏夹任务。")
+        self.favorite_scan = goal
+        self.update_favorite_count()
+        self.continue_favorite_scan(self.favorite_generation)
+
+    def continue_favorite_scan(self, generation):
+        if generation != self.favorite_generation or not self.favorite_scan:
+            return
+        if self.favorite_loading:
+            QTimer.singleShot(100, lambda: self.continue_favorite_scan(generation))
+        elif self.favorite_has_more:
+            self.load_favorites()
+        else:
+            if self.favorite_scan == "select":
+                self.favorite_selected = {video["bvid"] for video in self.favorites if video["available"]}
+                self.notice.setText("已选择整个收藏夹中的可用视频；已知失效视频已跳过。")
+            else:
+                self.notice.setText("已读取完整清单，搜索范围覆盖整个收藏夹。")
+            self.favorite_scan = None
+            self.render_favorites()
+
+    def stop_favorite_scan(self):
+        self.favorite_scan = None
+        self.update_favorite_count()
+        self.notice.setText("已停止继续读取，保留已加载内容和原有勾选。")
+
+    def favorite_scrolled(self, *_):
+        self.schedule_favorite_images()
+        bar = self.favorite_list.verticalScrollBar()
+        if self.tabs.currentIndex() == 1 and bar.maximum() - bar.value() < 100 and not self.favorite_search.text().strip() and not self.favorite_scan and not getattr(self, "favorite_page_error", False):
+            self.load_favorites()
+
+    def schedule_favorite_images(self):
+        self.favorite_image_timer.start(70)
+
+    def load_visible_covers(self):
+        if self.tabs.currentIndex() != 1 or not self.favorite_list.isVisible():
+            return
+        region = self.favorite_list.viewport().rect().adjusted(0, -160, 0, 200)
+        for i in range(self.favorite_list.count()):
+            if len(self.favorite_cover_pending) >= 3:
+                break
+            item = self.favorite_list.item(i)
+            if item.isHidden() or not region.intersects(self.favorite_list.visualItemRect(item)):
+                continue
+            video = item.data(Qt.ItemDataRole.UserRole)
+            url = video.get("thumbnail", "")
+            if not video["available"] or not url or url in self.favorite_covers or url in self.favorite_cover_errors or url in self.favorite_cover_pending:
+                continue
+            self.favorite_cover_pending.add(url)
+            def finish(data, url=url):
+                self.favorite_cover_pending.discard(url)
+                pixmap = QPixmap()
+                if pixmap.loadFromData(data) and not pixmap.isNull():
+                    self.favorite_covers[url] = pixmap.scaled(320, 180, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                    while len(self.favorite_covers) > 180:
+                        self.favorite_covers.popitem(last=False)
+                else:
+                    self.favorite_cover_errors.add(url)
+                self.favorite_list.viewport().update()
+                self.schedule_favorite_images()
+            def failed(_, url=url):
+                self.favorite_cover_pending.discard(url)
+                self.favorite_cover_errors.add(url)
+                self.favorite_list.viewport().update()
+                self.schedule_favorite_images()
+            self.async_job(lambda url=url: self.fetch_cover(url), finish, failed, pool=self.thumbnail_pool)
+
+    def favorite_context_menu(self, point):
+        item = self.favorite_list.itemAt(point)
+        if not item:
+            return
+        video = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        if video["available"]:
+            menu.addAction("选择分P", lambda: self.open_favorite_parts(video))
+            menu.addAction("在B站打开", lambda: QDesktopServices.openUrl(QUrl(f'https://www.bilibili.com/video/{video["bvid"]}/')))
+        if video.get("thumbnail"):
+            def retry():
+                self.favorite_cover_errors.discard(video["thumbnail"])
+                self.favorite_covers.pop(video["thumbnail"], None)
+                self.schedule_favorite_images()
+            menu.addAction("重试封面", retry)
+        menu.exec(self.favorite_list.mapToGlobal(point))
+
+    def open_favorite_parts(self, video):
+        if not video["available"]:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择视频分P")
+        dialog.resize(550, 440)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(label(video["title"], "sectionTitle"))
+        all_parts = QCheckBox("全选分P")
+        layout.addWidget(all_parts)
+        listing = QListWidget()
+        layout.addWidget(listing, 1)
+        hint = label("正在读取分P…", "muted")
+        layout.addWidget(hint)
+        all_parts.toggled.connect(lambda checked: self.select_items(listing, checked))
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("应用选择")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        closed = threading.Event()
+        dialog.finished.connect(lambda _: closed.set())
+        generation = self.favorite_generation
+        cookies = dict(self.manager.cookies)
+        def success(meta):
+            if closed.is_set() or generation != self.favorite_generation:
+                return
+            selected = self.favorite_parts.get(video["bvid"], [p["page"] for p in meta["pages"]] if self.favorite_all_pages.isChecked() else [1])
+            for part in meta["pages"]:
+                item = QListWidgetItem(f'P{part["page"]} {part["part"]} · {duration(part["duration"])}')
+                item.setData(Qt.ItemDataRole.UserRole, part["page"])
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked if part["page"] in selected else Qt.CheckState.Unchecked)
+                listing.addItem(item)
+            hint.setText("本条视频的分P选择优先于批量“下载全部分P”设置。")
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
+        def error(message):
+            if not closed.is_set():
+                hint.setText(message)
+        self.async_job(lambda: video_metadata(video["bvid"], cookies), success, error)
+        if dialog.exec() == QDialog.DialogCode.Accepted and generation == self.favorite_generation:
+            selected = [listing.item(i).data(Qt.ItemDataRole.UserRole) for i in range(listing.count()) if listing.item(i).checkState() == Qt.CheckState.Checked]
+            if selected:
+                self.favorite_parts[video["bvid"]] = selected
+                self.favorite_selected.add(video["bvid"])
+            else:
+                self.favorite_parts.pop(video["bvid"], None)
+                self.favorite_selected.discard(video["bvid"])
+            self.render_favorites()
+        dialog.deleteLater()
+
+    def enqueue_specs(self, specs):
+        ids = []
+        for start in range(0, len(specs), 100):
+            ids.extend(self.manager.add(specs[start:start + 100]))
+        return ids
+
+    def add_favorites(self):
+        if not self.favorite_selected or getattr(self, "favorite_submitting", False):
+            return
+        profile, specs = self.danmaku_snapshot(), []
+        quality = self.favorite_quality.currentData()
+        quality = self.default_quality.currentData() if quality == -1 else quality
+        if profile["enabled"] and quality in {125, 126}:
+            self.notice.setText("弹幕版暂不支持HDR和杜比视界，请选择普通SDR画质。")
+            return
+        for video in self.favorites:
+            if video["bvid"] not in self.favorite_selected or not video["available"]:
+                continue
+            pages = self.favorite_parts.get(video["bvid"])
+            for page in pages or [1]:
+                specs.append({"url": video["bvid"], "page": page, "title": video["title"], "directory": self.directory.text(), "quality": quality, "all_pages": not pages and self.favorite_all_pages.isChecked(), "danmaku": profile})
+        if not specs:
+            return
+        self.favorite_submitting = True
+        self.update_favorite_count()
+        def success(ids):
+            self.favorite_submitting = False
+            self.update_favorite_count()
+            self.notice.setText(f"已加入 {len(ids)} 个收藏夹任务；保存目录和弹幕配置已固定。")
             self.tabs.setCurrentIndex(0)
-        except ValueError as exc:
-            self.notice.setText(str(exc))
+        def error(message):
+            self.favorite_submitting = False
+            self.update_favorite_count()
+            self.notice.setText("部分任务可能已入队，请先查看下载队列。" + message)
+        self.async_job(lambda: self.enqueue_specs(specs), success, error)
 
     def setup_tray(self):
         self.tray = None

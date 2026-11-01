@@ -1,7 +1,7 @@
+import { DanmakuControls } from "./danmaku.js";
+import { FavoriteBrowser } from "./favorites.js";
+
 let meta = null;
-let favoriteItems = [];
-let favoriteAdvancedLoaded = false;
-let favoriteSelection = new Set();
 let autoWake = true;
 const $ = id => document.getElementById(id);
 const defaults = { token: "", directory: "", mode: "desktop", askSave: true, autoWake: true, extensionEnabled: true, floatingEnabled: true };
@@ -19,6 +19,10 @@ function applyFeatureState(config) {
   if (!enabled) status("插件当前已停用，请打开设置重新启用。", true);
 }
 const duration = seconds => Math.floor((seconds || 0) / 60) + ":" + String((seconds || 0) % 60).padStart(2, "0");
+const danmaku = new DanmakuControls(send, status);
+danmaku.mount($("video-danmaku"), true);
+danmaku.mount($("favorite-danmaku"));
+const favorites = new FavoriteBrowser(send, status, danmaku);
 
 async function send(message) {
   const response = await chrome.runtime.sendMessage(message);
@@ -62,8 +66,9 @@ function updateMode() {
   const browser = mode() === "browser";
   $("choose-dir").disabled = browser;
   $("directory").hidden = browser;
+  danmaku.setBrowserMode(browser);
   $("mode-note").textContent = browser
-    ? "使用Edge保存对话框选择文件位置。DASH音视频会分别保存，需要本地合并。"
+    ? "浏览器直下不生成弹幕版。DASH音视频会分别保存，可使用Edge保存对话框选择位置。"
     : autoWake ? "下载时自动唤醒桌面端，在后台合并MP4。首次请到设置完成连接。" : "自动唤醒已关闭。请先打开桌面端，或在设置中开启自动唤醒。";
 }
 
@@ -76,7 +81,7 @@ $("download").addEventListener("click", () => busy("download", async () => {
   const pages = [...document.querySelectorAll('#pages input:checked')].map(input => Number(input.value));
   if (!pages.length) throw new Error("请至少选择一个分P。");
   status(mode() === "browser" ? "正在提交浏览器下载…" : "正在连接桌面端并添加任务，首次唤醒可能需要几秒…");
-  const result = await send({ action: "download", url: meta.url, pages, quality: Number($("quality").value), mode: mode() });
+  const result = await send({ action: "download", url: meta.url, pages, quality: Number($("quality").value), mode: mode(), danmaku: await danmaku.snapshot(mode() === "browser") });
   status(result.message);
 }));
 $("choose-dir").addEventListener("click", () => busy("choose-dir", async () => {
@@ -111,65 +116,6 @@ $("sync-login").addEventListener("click", () => busy("sync-login", async () => {
   status("桌面已登录：" + account.name + "（本次运行有效，未保存Cookie）。");
 }));
 $("expand").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("popup.html") + ($("url").value ? "?video=" + encodeURIComponent($("url").value) : "") }));
-$("folders").addEventListener("click", () => busy("folders", async () => {
-  status("正在加载收藏夹…");
-  const folders = await send({ action: "folders" });
-  $("folder").replaceChildren(new Option("选择收藏夹", ""));
-  folders.forEach(folder => $("folder").add(new Option(folder.title + " · " + (folder.media_count || 0) + " 个", folder.id)));
-  favoriteItems = [];
-  favoriteSelection = new Set();
-  favoriteAdvancedLoaded = false;
-  $("favorite-list").replaceChildren();
-  $("favorite-count").textContent = "选择收藏夹后点击“高级选项”加载视频。";
-  status("已加载 " + folders.length + " 个收藏夹。");
-}));
-$("favorite-advanced").addEventListener("click", () => busy("favorite-advanced", async () => {
-  const panel = $("favorite-advanced-panel");
-  panel.hidden = !panel.hidden;
-  if (panel.hidden || favoriteAdvancedLoaded) return;
-  if (!$("folder").value) throw new Error("先选择收藏夹。");
-  status("正在加载收藏夹视频…");
-  favoriteItems = await send({ action: "favoriteItems", folderId: $("folder").value });
-  favoriteSelection = new Set(favoriteItems.map(item => item.bvid));
-  favoriteAdvancedLoaded = true;
-  renderFavoriteItems();
-  status("已加载 " + favoriteItems.length + " 个视频，可筛选后勾选。");
-}));
-$("folder").addEventListener("change", () => {
-  favoriteItems = []; favoriteAdvancedLoaded = false;
-  favoriteSelection = new Set();
-  $("favorite-list").replaceChildren();
-  $("favorite-count").textContent = "选择收藏夹后点击“高级选项”加载视频。";
-});
-function visibleFavoriteItems() {
-  const query = $("favorite-search").value.trim().toLowerCase();
-  return favoriteItems.filter(item => !query || String(item.title || "").toLowerCase().includes(query) || String(item.bvid || "").toLowerCase().includes(query));
-}
-function renderFavoriteItems() {
-  const list = $("favorite-list");
-  list.replaceChildren();
-  const visible = visibleFavoriteItems();
-  visible.forEach(item => {
-    const row = document.createElement("label"); row.className = "favorite-item";
-    const input = document.createElement("input"); input.type = "checkbox"; input.value = item.bvid; input.checked = favoriteSelection.has(item.bvid);
-    input.addEventListener("change", () => { if (input.checked) favoriteSelection.add(item.bvid); else favoriteSelection.delete(item.bvid); renderFavoriteCount(); });
-    const text = document.createElement("span"); text.textContent = (item.title || item.bvid) + " · " + item.bvid;
-    row.append(input, text); list.append(row);
-  });
-  renderFavoriteCount();
-}
-function renderFavoriteCount() { $("favorite-count").textContent = "当前显示 " + visibleFavoriteItems().length + " 个，已选择 " + favoriteSelection.size + " 个。"; }
-$("favorite-search").addEventListener("input", renderFavoriteItems);
-$("favorite-all").addEventListener("click", () => { visibleFavoriteItems().forEach(item => favoriteSelection.add(item.bvid)); renderFavoriteItems(); });
-$("favorite-none").addEventListener("click", () => { visibleFavoriteItems().forEach(item => favoriteSelection.delete(item.bvid)); renderFavoriteItems(); });
-$("favorite-download").addEventListener("click", () => busy("favorite-download", async () => {
-  if (!$("folder").value) throw new Error("先选择收藏夹。");
-  status("正在读取收藏夹并加入本地队列…");
-  const selectedBvids = favoriteAdvancedLoaded ? [...favoriteSelection] : undefined;
-  if (favoriteAdvancedLoaded && !selectedBvids.length) throw new Error("高级选项中至少选择一个视频。");
-  const result = await send({ action: "favoriteDownload", folderId: $("folder").value, selectedBvids, allPages: $("favorite-all-pages").checked });
-  status(result.message);
-}));
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.autoWake) { autoWake = changes.autoWake.newValue !== false; updateMode(); }
   if (area === "local" && (changes.extensionEnabled || changes.floatingEnabled)) chrome.storage.local.get(defaults).then(applyFeatureState);
@@ -181,6 +127,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   applyFeatureState(config);
   document.querySelector('input[name="mode"][value="' + (config.mode === "browser" ? "browser" : "desktop") + '"]').checked = true;
   updateMode();
+  await favorites.init();
+  await danmaku.init();
   if (config.extensionEnabled === false) return;
   const preset = new URLSearchParams(location.search).get("video");
   if (preset) { $("url").value = preset; await inspect(); return; }

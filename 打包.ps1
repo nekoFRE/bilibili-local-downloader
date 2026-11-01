@@ -23,7 +23,9 @@ if ($LASTEXITCODE -ne 0) { throw '打包失败，请查看上面的信息。' }
 if ($LASTEXITCODE -ne 0) { throw '唤醒助手打包失败，请查看上面的信息。' }
 New-Item -ItemType Directory -Path $taskRelease -Force | Out-Null
 $taskStagedRelease = Join-Path $taskBuild '发行版\B站视频下载器'
-Get-ChildItem -LiteralPath $taskStagedRelease | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $taskRelease -Recurse -Force }
+foreach ($taskProgramName in @('B站视频下载器.exe', '_internal')) {
+    Copy-Item -LiteralPath (Join-Path $taskStagedRelease $taskProgramName) -Destination $taskRelease -Recurse -Force
+}
 Copy-Item -LiteralPath (Join-Path $taskBuild '助手\browser-bridge.exe') -Destination $taskRelease -Force
 Copy-Item -LiteralPath 'edge-extension' -Destination $taskRelease -Recurse -Force
 Copy-Item -LiteralPath '使用说明.md' -Destination $taskRelease -Force

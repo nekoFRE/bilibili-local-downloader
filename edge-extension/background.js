@@ -1,4 +1,5 @@
 import { normalizeInput, safeName, chooseVideo, qualityList, mediaUrl } from "./core.js";
+import { normalizeProfile, readWebSettings } from "./danmaku.js";
 
 const LOCAL = "http://127.0.0.1:17890";
 const NATIVE_HOST = "com.bili_local.downloader";
@@ -249,15 +250,55 @@ async function downloadBrowser(meta, pages, quality, askSave) {
   return { message: "已启动 " + ids.length + " 个文件下载。音视频分离时，请使用桌面程序的本地合并工具。", ids };
 }
 
-async function favoriteItems(folderId) {
-  const items = [];
-  for (let page = 1; ; page++) {
-    const data = await biliAPI("/x/v3/fav/resource/list", { media_id: Number(folderId), pn: page, ps: 20 });
-    items.push(...(data.medias || []).filter(item => item.bvid));
-    if (!data.has_more || !data.medias?.length) break;
-    if (items.length >= 500) throw new Error("收藏夹超过500个视频，请用桌面版分批添加。");
+async function favoritePage(folderId, page = 1) {
+  if (!Number.isSafeInteger(Number(folderId)) || Number(folderId) <= 0 || !Number.isInteger(page) || page < 1) throw new Error("收藏夹或页码无效。");
+  const data = await biliAPI("/x/v3/fav/resource/list", { media_id: Number(folderId), pn: page, ps: 20 });
+  const items = (data.medias || []).map(item => ({
+    key: item.bvid || String(item.id), bvid: item.bvid || "", title: item.title || "不可用视频", author: item.upper?.name || "", cover: item.cover || "", duration: item.duration || 0,
+    available: /^BV[0-9A-Za-z]{10}$/.test(item.bvid || "") && !["已失效视频", "失效视频", "视频已失效"].includes(item.title),
+  }));
+  return { items, page, has_more: Boolean(data.has_more && items.length), total: Number(data.info?.media_count || 0) };
+}
+
+async function danmakuReference(url, sender) {
+  let bvid;
+  try { bvid = normalizeInput(url || "").bvid; } catch {}
+  const tabs = (await chrome.tabs.query({})).filter(tab => /^https:\/\/(?:www\.)?bilibili\.com\/(?:video\/|list\/|medialist\/play\/)/.test(tab.url || ""));
+  const matching = tabs.filter(tab => !bvid || tab.url.includes(bvid));
+  const tab = matching.find(tab => tab.id === sender.tab?.id) || matching.find(tab => tab.active) || matching.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  let reference = null;
+  if (tab?.id) {
+    try {
+      const results = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: readWebSettings });
+      const raw = results?.[0]?.result;
+      if (raw?.fields?.length && raw.values) {
+        const normalized = normalizeProfile(raw.values);
+        const fields = ["font", "opacity", "area", "duration", "scroll", "top", "bottom", "reserve"].filter(key => raw.fields.includes(key));
+        reference = { fields, values: Object.fromEntries(fields.map(key => [key, normalized[key]])) };
+      }
+    } catch {} // 页面无权限或播放器配置尚未落地时，明确回退默认值。
   }
-  return items;
+  try { await localRequest("/danmaku-settings", { reference }, 1500, { wake: false }); } catch {}
+  return reference;
+}
+
+async function submitTasks(tasks) {
+  if (!tasks.length) throw new Error("请至少勾选一个视频或分P。");
+  if (tasks.some(task => task.danmaku?.enabled)) {
+    const info = await localRequest("/status");
+    if (!info.capabilities?.includes("danmaku")) throw new Error("当前桌面端不支持弹幕版，请退出旧程序并打开1.5.0或更新版本。");
+  }
+  const login = await cookies();
+  let added = 0;
+  for (let start = 0; start < tasks.length; start += 100) {
+    try {
+      const result = await localRequest("/tasks", { tasks: tasks.slice(start, start + 100), cookies: login });
+      added += result.added;
+    } catch (error) {
+      throw new Error((start ? "已有 " + added + " 个任务入队，后续批次已停止。" : "") + error.message + " 请先检查桌面队列；重复操作会跳过相同任务。");
+    }
+  }
+  return added;
 }
 
 async function handle(request, sender) {
@@ -273,6 +314,8 @@ async function handle(request, sender) {
       return {};
     }
     case "inspect": return inspect(request.url);
+    case "videoParts": return metadata(request.url);
+    case "danmakuReference": return danmakuReference(request.url, sender);
     case "status": return localRequest("/status");
     case "directory": {
       const result = await localRequest("/status", undefined, 1800, { wake: false });
@@ -321,12 +364,14 @@ async function handle(request, sender) {
       const pages = [...new Set((request.pages || [meta.page]).map(Number))];
       if (!pages.length || pages.length > 500 || pages.some(page => !meta.pages.some(p => p.page === page))) throw new Error("请选择有效分P。");
       const config = await settings();
-      if (request.mode === "browser") return downloadBrowser(meta, pages, Number(request.quality) || 0, config.askSave);
-      const result = await localRequest("/tasks", {
-        tasks: pages.map(page => ({ url: meta.url, title: meta.title, page, quality: Number(request.quality) || 0 })),
-        cookies: await cookies(),
-      });
-      return { message: "已加入 " + result.added + " 个本地任务。可以关闭扩展窗口，桌面程序会继续下载。" };
+      const danmaku = normalizeProfile(request.danmaku || {});
+      if (request.mode === "browser") {
+        if (danmaku.enabled) throw new Error("弹幕版需要选择“桌面合并MP4”模式。");
+        return downloadBrowser(meta, pages, Number(request.quality) || 0, config.askSave);
+      }
+      if (danmaku.enabled && [125, 126].includes(Number(request.quality))) throw new Error("弹幕版暂不支持HDR和杜比视界，请选择普通SDR画质。");
+      const added = await submitTasks(pages.map(page => ({ url: meta.url, title: meta.title, page, quality: Number(request.quality) || 0, danmaku })));
+      return { message: "已加入 " + added + " 个本地任务。设置已固定，可以关闭扩展窗口。" };
     }
     case "folders": {
       const account = await biliAPI("/x/web-interface/nav");
@@ -334,18 +379,22 @@ async function handle(request, sender) {
       const result = await biliAPI("/x/v3/fav/folder/created/list-all", { up_mid: account.mid });
       return result.list || [];
     }
-    case "favoriteItems": return favoriteItems(request.folderId);
+    case "favoriteItems": return favoritePage(request.folderId, Number(request.page) || 1);
     case "favoriteDownload": {
-      const allItems = await favoriteItems(request.folderId);
-      const hasSelection = Array.isArray(request.selectedBvids);
-      const selected = new Set((request.selectedBvids || []).map(String));
-      const items = hasSelection ? allItems.filter(item => selected.has(item.bvid)) : allItems;
-      if (!items.length) throw new Error("收藏夹为空。");
-      const result = await localRequest("/tasks", {
-        tasks: items.map(item => ({ url: item.bvid, title: item.title, page: 1, quality: 0, all_pages: !!request.allPages })),
-        cookies: await cookies(),
+      if (!Array.isArray(request.items) || !request.items.length) throw new Error("请至少勾选一个收藏夹视频。");
+      const danmaku = normalizeProfile(request.danmaku || {}), quality = Number(request.quality) || 0;
+      if (danmaku.enabled && [125, 126].includes(quality)) throw new Error("弹幕版暂不支持HDR和杜比视界，请选择普通SDR画质。");
+      const tasks = request.items.flatMap(item => {
+        const parsed = normalizeInput(item.bvid);
+        if (Array.isArray(item.pages)) {
+          const pages = [...new Set(item.pages.map(Number))];
+          if (!pages.length || pages.some(page => !Number.isInteger(page) || page < 1 || page > 10000)) throw new Error("选择的分P无效。");
+          return pages.map(page => ({ url: parsed.url, title: String(item.title || parsed.bvid).slice(0, 300), page, quality, danmaku }));
+        }
+        return [{ url: parsed.url, title: String(item.title || parsed.bvid).slice(0, 300), page: 1, quality, danmaku, all_pages: !!request.allPages }];
       });
-      return { message: "已加入 " + result.added + " 个收藏夹任务，详见桌面下载队列。" };
+      const added = await submitTasks(tasks);
+      return { message: "已加入 " + added + " 个收藏夹任务，弹幕、分P和目录已按入队时的设置固定。" };
     }
     default: throw new Error("未知操作");
   }

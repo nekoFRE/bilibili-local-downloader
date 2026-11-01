@@ -4,31 +4,35 @@
 <body>
 <header><div><h1>B站视频下载器</h1><p>从浏览器，保存到本地。</p></div><div class="header-actions"><label id="quick-control" class="switch quick-switch"><input id="quick-enabled" type="checkbox" checked><span></span><b id="quick-state">ON</b></label><button id="options" class="light">设置</button></div></header>
 <main>
+ <div id="home-view">
   <section class="card">
     <div class="row"><input id="url" placeholder="视频链接、BV号或分享文字"><button id="inspect" class="primary">解析</button></div>
     <div class="preview"><img id="cover" alt="视频封面" hidden><div><h2 id="title">选择你想保存的视频</h2><p id="info">支持画质选择和多P下载</p></div></div>
     <div class="row"><label for="quality">画质</label><select id="quality"><option value="0">自动 · 最高可用</option></select><label class="check"><input id="all-pages" type="checkbox">全选分P</label></div>
     <div id="pages"></div>
+    <div id="video-danmaku"></div>
     <div class="row modes"><label class="check"><input name="mode" value="desktop" type="radio" checked>桌面合并MP4</label><label class="check"><input name="mode" value="browser" type="radio">浏览器直接下载</label></div>
     <p id="mode-note" class="hint">下载时自动唤醒桌面端，在后台合并MP4。首次请到设置完成连接。</p>
     <p id="directory" class="path">保存目录：桌面程序的默认目录</p>
     <div class="row"><button id="choose-dir">选择保存目录</button><button id="download" class="primary" disabled>开始下载</button></div>
   </section>
-  <section class="card">
-    <div class="row"><h2>收藏夹批量下载</h2><button id="folders" class="light">加载</button><button id="favorite-advanced" class="light">高级选项</button></div>
-    <div class="row"><select id="folder"><option value="">选择收藏夹</option></select><button id="favorite-download">加入本地队列</button></div>
-    <label class="check"><input id="favorite-all-pages" type="checkbox" checked>下载全部分P</label>
-    <div id="favorite-advanced-panel" hidden>
-      <div class="row"><input id="favorite-search" placeholder="筛选标题或BV号"><button id="favorite-all">全选</button><button id="favorite-none">全不选</button></div>
-      <p id="favorite-count" class="hint">先选择收藏夹并点击“加载视频”。</p>
-      <div id="favorite-list"></div>
-    </div>
-    <p class="hint">批量任务由桌面程序下载、合并，失效视频不会影响其他任务。</p>
-  </section>
+  <section class="card favorite-entry"><div><h2>收藏夹下载</h2><p class="hint">看封面挑视频，交给桌面端下载。</p></div><button id="browse-favorites">浏览并选择</button></section>
+ </div>
+ <section id="favorites-view" class="favorite-browser" hidden aria-label="收藏夹浏览与选择">
+   <div class="row"><button id="favorites-back" class="light">← 返回</button><h2>收藏夹</h2><div class="favorite-view-switch" role="group" aria-label="显示方式"><button data-favorite-view="card" aria-pressed="true">卡片</button><button data-favorite-view="list" aria-pressed="false">列表</button></div></div>
+   <div class="row"><select id="folder" aria-label="选择收藏夹"><option value="">选择收藏夹</option></select><button id="folders" class="light">刷新收藏夹</button></div>
+   <div class="row favorite-search-row"><input id="favorite-search" placeholder="筛选已加载视频：标题 / UP主 / BV号" aria-label="筛选已加载视频"><button id="favorite-search-all" class="light">搜索整个收藏夹</button></div>
+   <div class="row favorite-tools"><button id="favorite-all">全选已加载</button><button id="favorite-none">取消全部选择</button><button id="favorite-whole" class="light">选择整个收藏夹</button><button id="favorite-stop" class="light" hidden>停止读取</button></div>
+   <p id="favorite-count" class="hint" role="status">选择收藏夹后，视频会分批显示。</p>
+   <div id="favorite-scroll" class="favorite-scroll"><div id="favorite-list"></div><p id="favorite-empty" class="hint empty">选择收藏夹后，视频会分批显示在这里。</p><div id="favorite-sentinel"></div><button id="favorite-more" class="favorite-more" disabled>继续加载</button></div>
+   <details class="favorite-settings"><summary>本次下载设置</summary><div class="row"><label for="favorite-quality">画质</label><select id="favorite-quality"><option value="0">自动 · 最高可用</option><option value="112">1080P 高码率</option><option value="80">1080P</option><option value="64">720P</option><option value="32">480P</option><option value="120">4K</option></select></div><label class="check"><input id="favorite-all-pages" type="checkbox" checked>下载全部分P（单条选择优先）</label><div id="favorite-danmaku"></div><p id="favorite-directory" class="path">保存目录：跟随桌面程序</p><button id="favorite-choose-dir">选择保存目录</button></details>
+   <button id="favorite-download" class="primary favorite-submit" disabled>加入下载队列（0）</button>
+ </section>
   <p id="status" role="status">准备好了。</p>
-  <div class="row"><button id="open-desktop" class="light">打开桌面端</button><button id="sync-login" class="light">同步Edge登录到桌面</button></div>
+  <div class="row global-actions"><button id="open-desktop" class="light">打开桌面端</button><button id="sync-login" class="light">同步Edge登录到桌面</button></div>
   <footer><button id="refresh" class="light">检查本机连接</button><button id="floating" class="light">在视频页悬浮</button><button id="expand" class="light">独立页面</button></footer>
 </main>
-<script src="popup.js"></script>
+<dialog id="favorite-parts-dialog" class="parts-dialog" aria-label="选择视频分P"><h2 id="favorite-parts-title"></h2><label class="check"><input id="favorite-parts-all" type="checkbox">全选分P</label><div id="favorite-parts-list"></div><div class="row"><button id="favorite-parts-cancel">取消</button><button id="favorite-parts-apply" class="primary">应用选择</button></div></dialog>
+<script src="popup.js" type="module"></script>
 <script src="directory.js"></script>
 </body></html>

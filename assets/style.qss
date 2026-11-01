@@ -29,6 +29,13 @@ QScrollArea { border: none; background: transparent; }
 QCheckBox { spacing: 7px; }
 QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid #c7d3e2; border-radius: 4px; background: #ffffff; }
 QCheckBox::indicator:checked { background: #00a2d6; border-color: #00a2d6; image: url(assets/check.svg); }
+QLabel#dmIsolation { color:#0086b0; background:#eaf7fc; border-radius:7px; padding:9px; font-weight:500; }
+QSlider::groove:horizontal { height:5px; background:#e3ebf2; border-radius:2px; }
+QSlider::sub-page:horizontal { background:#52bdda; border-radius:2px; }
+QSlider::handle:horizontal { width:14px; margin:-5px 0; background:#00a2d6; border-radius:7px; }
+QSpinBox { background:#f9fbfe; border:1px solid #dfe5ef; border-radius:7px; padding:6px; }
+QPushButton#viewMode { padding:7px 10px; }
+QPushButton#viewMode:checked { background:#e5f6fc; border-color:#8bd3e9; color:#0086b0; }
 QScrollBar:vertical { background: transparent; width: 8px; }
 QScrollBar::handle:vertical { background: #d4dce8; border-radius: 4px; min-height: 24px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }

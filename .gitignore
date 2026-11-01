@@ -35,5 +35,6 @@ tasks.tmp
 *.webm
 *.mp3
 *.wav
+*.ass
 /tools/*.exe
 /tools/*.dll

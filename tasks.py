@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import copy
 import hmac
 import json
 import os
@@ -17,6 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from browser_bridge import register_host
+from danmaku import normalize_profile, normalize_reference, profile_identity
 from downloader import APP_ROOT, Cancelled, DownloadError, account_info, download_video, normalize_input, video_metadata
 
 PORT = 17890
@@ -124,6 +126,8 @@ class TaskManager:
         self.history_path = settings.data_dir / "tasks.json"
         self.directory_requests = queue.Queue()
         self.window_requests = queue.Queue(maxsize=1)
+        self.danmaku_reference = None
+        self.danmaku_revision = 0
         if self.history_path.exists():
             try:
                 self.tasks = json.loads(self.history_path.read_text(encoding="utf-8"))
@@ -140,13 +144,14 @@ class TaskManager:
 
     def snapshot(self):
         with self.lock:
-            return [dict(task) for task in self.tasks]
+            return copy.deepcopy(self.tasks)
 
     def add(self, specs, cookies=None):
         if not specs or len(specs) > 500:
             raise ValueError("一次请添加1到500个任务。")
         added = []
         with self.lock:
+            prepared = []
             for spec in specs:
                 bv, url_page, url = normalize_input(spec["url"])
                 page = int(spec.get("page") or url_page)
@@ -154,18 +159,29 @@ class TaskManager:
                     raise ValueError("分P编号无效。")
                 directory = str(Path(spec.get("directory") or self.settings.values["directory"]).expanduser().resolve())
                 quality = int(spec.get("quality") or 0)
-                identity = f"{bv}|{page}|{quality}|{os.path.normcase(directory)}" + ("|all" if spec.get("all_pages") else "")
-                duplicate = next((t for t in self.tasks if t["identity"] == identity and t["status"] not in {"失败", "已取消", "已中断"} and (t["status"] not in {"已完成", "已跳过"} or Path(t.get("path", "")).is_file())), None)
+                profile = normalize_profile(spec.get("danmaku"))
+                identity = f"{bv}|{page}|{quality}|{os.path.normcase(directory)}" + ("|all" if spec.get("all_pages") else "") + profile_identity(profile)
+                duplicate = next((t for t in [*self.tasks, *prepared] if t["identity"] == identity and t["status"] not in {"失败", "已取消", "已中断"} and (t["status"] not in {"已完成", "已跳过"} or Path(t.get("path", "")).is_file())), None)
                 if duplicate:
                     continue
-                task = {"id": uuid.uuid4().hex, "identity": identity, "url": url, "bvid": bv, "page": page, "quality": quality, "directory": directory, "title": spec.get("title") or bv, "status": "等待中", "progress": 0, "detail": "等待下载", "path": "", "created": time.strftime("%Y-%m-%d %H:%M:%S"), "all_pages": bool(spec.get("all_pages"))}
-                self.tasks.append(task)
+                task = {"id": uuid.uuid4().hex, "identity": identity, "url": url, "bvid": bv, "page": page, "quality": quality, "directory": directory, "title": str(spec.get("title") or bv)[:300], "status": "等待中", "progress": 0, "detail": "等待下载" + (" · 弹幕版（设置已固定）" if profile["enabled"] else ""), "path": "", "created": time.strftime("%Y-%m-%d %H:%M:%S"), "all_pages": bool(spec.get("all_pages")), "danmaku": profile}
+                prepared.append(task)
+            self.tasks.extend(prepared)
+            for task in prepared:
                 if cookies:
                     self.task_cookies[task["id"]] = dict(cookies)
                 added.append(task["id"])
             self._save()
         self.wakeup.set()
         return added
+
+    def set_danmaku_reference(self, value):
+        reference = normalize_reference(value)
+        with self.lock:
+            if reference != self.danmaku_reference:
+                self.danmaku_reference = reference
+                self.danmaku_revision += 1
+        return reference
 
     def set_cookies(self, cookies, persist=True, source="本地保存"):
         with self.lock:
@@ -229,13 +245,13 @@ class TaskManager:
             try:
                 if task.get("all_pages"):
                     meta = video_metadata(task["url"], cookies)
-                    extras = [{"url": task["url"], "page": p["page"], "directory": task["directory"], "quality": task["quality"], "title": meta["title"]} for p in meta["pages"] if p["page"] != task["page"]]
-                    if extras:
-                        self.add(extras, cookies)
+                    extras = [{"url": task["url"], "page": p["page"], "directory": task["directory"], "quality": task["quality"], "title": meta["title"], "danmaku": task.get("danmaku")} for p in meta["pages"] if p["page"] != task["page"]]
+                    for start in range(0, len(extras), 100):
+                        self.add(extras[start:start + 100], cookies)
                     task["all_pages"] = False
                 result = self.download_function(task, cookies, notify, self.cancel)
                 with self.lock:
-                    task.update(status="已完成", progress=100, detail="下载完成", **result)
+                    task.update(status="已完成", progress=100, detail=result.pop("summary", "下载完成"), **result)
             except Cancelled:
                 with self.lock:
                     task.update(status="已取消", detail="已取消，临时文件已清理")
@@ -313,10 +329,12 @@ class Bridge:
 
             def do_GET(self):
                 if self.path == "/health" and self.valid_host() and self.allowed_origin():
-                    self.reply(200, {"app": "bili-local-downloader", "version": "1.4.0"})
+                    self.reply(200, {"app": "bili-local-downloader", "version": "1.5.0"})
                 elif self.authenticate():
                     if self.path == "/status":
-                        self.reply(200, {"version": "1.4.0", "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
+                        self.reply(200, {"version": "1.5.0", "capabilities": ["danmaku"], "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
+                    elif self.path == "/danmaku-settings":
+                        self.reply(200, {"reference": bridge.manager.danmaku_reference})
                     elif urlparse(self.path).path == "/directory-result":
                         request_id = parse_qs(urlparse(self.path).query).get("id", [""])[0]
                         request = bridge.directory_results.get(request_id)
@@ -345,6 +363,9 @@ class Bridge:
                         cookies = checked_cookies(body.get("cookies") or {})
                         ids = bridge.manager.add(body.get("tasks") or [], cookies)
                         self.reply(200, {"added": len(ids), "ids": ids})
+                    elif self.path == "/danmaku-settings":
+                        reference = bridge.manager.set_danmaku_reference(body.get("reference"))
+                        self.reply(200, {"reference": reference})
                     elif self.path == "/login":
                         cookies = checked_cookies(body.get("cookies") or {})
                         if not cookies.get("SESSDATA"):

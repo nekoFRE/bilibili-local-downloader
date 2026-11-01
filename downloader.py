@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from danmaku import fetch_comments, normalize_profile, write_ass
+
 APP_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
@@ -186,17 +188,27 @@ def favorite_folders(cookies):
 
 def favorite_videos(folder_id, cookies):
     result, page = [], 1
-    with session_for(cookies) as session:
-        while True:
-            data = api_get(session, "/x/v3/fav/resource/list", {"media_id": int(folder_id), "pn": page, "ps": 20})
-            medias = data.get("medias") or []
-            for item in medias:
-                if item.get("bvid"):
-                    result.append({"bvid": item["bvid"], "title": item.get("title", ""), "author": item.get("upper", {}).get("name", ""), "duration": item.get("duration", 0)})
-            if not data.get("has_more") or not medias:
-                break
-            page += 1
+    while True:
+        data = favorite_page(folder_id, cookies, page)
+        result.extend(data["items"])
+        if not data["has_more"]:
+            break
+        page += 1
     return result
+
+
+def favorite_page(folder_id, cookies, page=1):
+    page = int(page)
+    if not 1 <= page <= 100000:
+        raise DownloadError("收藏夹页码无效。")
+    with session_for(cookies) as session:
+        data = api_get(session, "/x/v3/fav/resource/list", {"media_id": int(folder_id), "pn": page, "ps": 20})
+    items = []
+    for item in data.get("medias") or []:
+        bvid, title = item.get("bvid", ""), item.get("title", "")
+        available = bool(re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid)) and title not in {"已失效视频", "失效视频", "视频已失效"}
+        items.append({"key": bvid or str(item.get("id", "")), "bvid": bvid, "title": title or "不可用视频", "author": item.get("upper", {}).get("name", ""), "duration": item.get("duration", 0), "cover": item.get("cover", ""), "available": available})
+    return {"items": items, "page": page, "has_more": bool(data.get("has_more") and items), "total": int(data.get("info", {}).get("media_count") or 0)}
 
 
 def ffmpeg_path():
@@ -250,25 +262,51 @@ def stream_urls(stream):
     return [x.replace("http://", "https://", 1) for x in [stream.get("baseUrl") or stream.get("base_url") or stream.get("url"), *(stream.get("backupUrl") or stream.get("backup_url") or [])] if x]
 
 
-def run_ffmpeg(args, cancel):
+def run_ffmpeg(args, cancel, cwd=None, progress=None, seconds=0):
     executable = ffmpeg_path()
     if not executable:
         raise DownloadError("未找到FFmpeg，请在设置中查看运行状态。")
-    process = subprocess.Popen([executable, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    while process.poll() is None:
-        if cancel.wait(.1):
-            process.kill()
-            process.communicate()
-            raise Cancelled("已取消")
-    _, stderr = process.communicate()
-    if process.returncode:
-        raise DownloadError("合并失败：" + stderr.decode("utf-8", errors="replace")[-700:])
+    # 输出写入临时句柄，避免较长渲染因管道写满而停住。
+    with tempfile.TemporaryFile() as errors, tempfile.TemporaryDirectory(prefix="bili-progress-") as progress_dir:
+        progress_path = Path(progress_dir) / "progress.txt"
+        command = [executable, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+        if progress:
+            command += ["-progress", str(progress_path), "-nostats"]
+        process = subprocess.Popen([*command, *args], cwd=cwd, stdout=subprocess.DEVNULL, stderr=errors, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        position = 0
+        while process.poll() is None:
+            if cancel.wait(.15):
+                process.kill()
+                process.wait()
+                raise Cancelled("已取消")
+            if progress and seconds and progress_path.is_file():
+                with progress_path.open("rb") as updates:
+                    updates.seek(position)
+                    chunk = updates.read(65536).decode("utf-8", errors="replace")
+                    position = updates.tell()
+                values = re.findall(r"out_time_us=(\d+)", chunk)
+                if values:
+                    progress(min(99.8, 97 + int(values[-1]) / 1000000 / seconds * 2.8))
+        if process.returncode:
+            errors.seek(0)
+            raise DownloadError("媒体处理失败：" + errors.read().decode("utf-8", errors="replace")[-700:])
+
+
+def unused_path(path):
+    index, original = 2, path
+    while path.exists():
+        path = original.with_name(f"{original.stem} ({index}){original.suffix}")
+        index += 1
+    return path
 
 
 def download_video(spec, cookies, notify, cancel):
     ensure_running(cancel)
     if not ffmpeg_path():
         raise DownloadError("未找到FFmpeg。请把FFmpeg放进tools目录后重试。")
+    profile = normalize_profile(spec.get("danmaku"))
+    if profile["enabled"] and int(spec.get("quality") or 0) in {125, 126}:
+        raise DownloadError("弹幕版暂不支持HDR和杜比视界，请选择普通SDR画质。")
     notify("解析中", 0, "获取最新播放地址")
     meta = video_metadata(spec["url"], cookies)
     page = int(spec.get("page") or meta["page"])
@@ -284,18 +322,17 @@ def download_video(spec, cookies, notify, cancel):
     name = f'{safe_name(meta["title"], 65)} [{meta["bvid"]}]'
     if multi:
         name += f' P{page:02d} {safe_name(part["part"], 45)}'
-    output = folder / (name + ".mp4")
-    # Preserve existing files, including files from other versions or different qualities.
-    suffix = 2
-    while output.exists():
-        output = folder / f"{name} ({suffix}).mp4"
-        suffix += 1
+    output = unused_path(folder / (name + ("（弹幕版）" if profile["enabled"] else "") + ".mp4"))
     temporary = Path(tempfile.mkdtemp(prefix=".bili-", dir=folder))
     actual_quality = 0
     try:
         videos = data.get("dash", {}).get("video") or []
         if videos:
             desired = int(spec.get("quality") or 0)
+            if profile["enabled"]:
+                videos = [v for v in videos if int(v.get("id", 0)) not in {125, 126}]
+                if not videos:
+                    raise DownloadError("弹幕版需要普通SDR视频轨道，请更换画质。")
             ids = {int(v.get("id", 0)) for v in videos}
             selected_id = desired if desired in ids else max((q for q in ids if not desired or q <= desired), default=min(ids))
             candidates = [v for v in videos if int(v.get("id", 0)) == selected_id]
@@ -332,8 +369,35 @@ def download_video(spec, cookies, notify, cancel):
         result = temporary / "result.mp4"
         if not result.is_file() or result.stat().st_size == 0:
             raise DownloadError("没有生成完整的MP4文件。")
+        summary = "下载完成"
+        if profile["enabled"]:
+            try:
+                with session_for(cookies) as session:
+                    comments = fetch_comments(session, part["cid"], part.get("duration"), notify, lambda: ensure_running(cancel))
+                stats = write_ass(temporary / "danmaku.ass", comments, profile, lambda: ensure_running(cancel))
+                notify("渲染弹幕", 97, f"已排布 {stats['rendered']} 条 · 渲染中，可取消")
+                rendered = temporary / "danmaku.mp4"
+                run_ffmpeg(["-i", str(result), "-map", "0:v:0", "-map", "0:a?", "-vf", "ass=danmaku.ass", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(rendered)], cancel, cwd=temporary, seconds=part.get("duration", 0), progress=lambda percent: notify("渲染弹幕", percent, "正在生成弹幕版MP4，可取消"))
+                ensure_running(cancel)
+                if not rendered.is_file() or not rendered.stat().st_size:
+                    raise DownloadError("弹幕版未生成完整视频。")
+                original_path = unused_path(folder / (name + ".mp4"))
+                if profile["save_ass"]:
+                    # ASS不与烧录版同名，避免播放器自动加载后显示两层弹幕。
+                    ass_output = original_path.with_suffix(".ass") if profile["keep_original"] else folder / (name + "（独立弹幕）.ass")
+                    shutil.copy2(temporary / "danmaku.ass", unused_path(ass_output))
+                if profile["keep_original"]:
+                    result.replace(original_path)
+                result = rendered
+                summary = f"下载完成 · 弹幕 {stats['rendered']} / {stats['received']} 条（过滤及防重叠后）" if comments else "下载完成 · 当前弹幕池为空，未获取到弹幕"
+            except Cancelled:
+                raise
+            except Exception as exc:
+                original = unused_path(folder / (name + "（弹幕失败，原视频）.mp4"))
+                result.replace(original)
+                raise DownloadError(f"弹幕处理未完成，普通视频已保留：{original.name}。{type(exc).__name__}：{exc}") from None
         result.replace(output)
-        return {"path": str(output), "quality": actual_quality, "cid": part["cid"], "title": meta["title"], "bvid": meta["bvid"]}
+        return {"path": str(output), "quality": actual_quality, "cid": part["cid"], "title": meta["title"], "bvid": meta["bvid"], "summary": summary}
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
 
