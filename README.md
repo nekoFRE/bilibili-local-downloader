@@ -10,9 +10,18 @@ Edge扩展负责视频页操作，Windows桌面端负责下载合并与后台队
 
 ![Windows 11 已验证](https://img.shields.io/badge/Windows_11-已验证-0078D4) ![Edge 扩展](https://img.shields.io/badge/Edge-悬浮下载-00A2D6) ![MP4 自动合并](https://img.shields.io/badge/MP4-自动合并-19A580)
 
-[开始使用（推荐）](#quick-start) · [单独使用桌面端](#desktop-only) · [完整使用说明](使用说明.md) · [获取源码与扩展](https://github.com/nekoFRE/bilibili-local-downloader/archive/refs/heads/main.zip)
+[让AI完成安装](#ai-install) · [开始使用（推荐）](#quick-start) · [单独使用桌面端](#desktop-only) · [完整使用说明](使用说明.md) · [获取源码与扩展](https://github.com/nekoFRE/bilibili-local-downloader/archive/refs/heads/main.zip)
 
 </div>
+
+<a id="ai-install"></a>
+## 让AI完成安装
+
+**不想手动配置？复制下面这句话，发给具备本机操作能力的AI助手：**
+
+```text
+请阅读 https://github.com/nekoFRE/bilibili-local-downloader 的安装说明，帮我在Windows电脑上完成桌面端环境准备、打包、Edge扩展安装及首次连接，保留已有数据，并在需要我手动操作时明确提示。
+```
 
 <table>
   <tr>
@@ -42,11 +51,7 @@ Edge扩展负责视频页操作，Windows桌面端负责下载合并与后台队
 <a id="desktop-and-edge"></a>
 ## 开始使用：桌面端 + Edge扩展（推荐）
 
-**让AI完成安装：** 将下面这句话复制给具备本机操作能力的AI助手：
-
-```text
-请阅读 https://github.com/nekoFRE/bilibili-local-downloader 的安装说明，帮我在Windows电脑上完成桌面端环境准备、打包、Edge扩展安装及首次连接，保留已有数据，并在需要我手动操作时明确提示。
-```
+可以使用顶部的[AI安装入口](#ai-install)，也可以按以下步骤手动安装：
 
 1. **准备桌面端。** 使用你已有的完整发行版，或先按[源码打包指南](使用说明.md#build-source)生成发行版。打开 `发行版\B站视频下载器\B站视频下载器.exe`，选择保存目录。
 2. **加载Edge扩展。** 在Edge地址栏输入 `edge://extensions`，开启「开发人员模式」，点击「加载解压缩的扩展」，选择发行版内的 **`edge-extension`** 文件夹。
