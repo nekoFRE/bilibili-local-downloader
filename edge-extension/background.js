@@ -6,6 +6,8 @@ const NATIVE_HOST = "com.bili_local.downloader";
 const defaults = { token: "", directory: "", mode: "desktop", askSave: true, syncLogin: true, autoWake: true, extensionEnabled: true, floatingEnabled: true };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let desktopReadyPromise = null;
+let submissionGeneration = 0;
+const checkSubmission = generation => { if (generation !== submissionGeneration) throw new Error("本批下载已全部取消，后续内容不会继续提交。"); };
 
 async function settings() {
   return chrome.storage.local.get(defaults);
@@ -196,7 +198,8 @@ async function toggleFloating(request) {
   return { opened: true };
 }
 
-async function browserFile(url, filename, askSave) {
+async function browserFile(url, filename, askSave, generation) {
+  checkSubmission(generation);
   // 规则只匹配这个下载地址，为B站媒体请求设置Referer。
   const rules = await chrome.declarativeNetRequest.getSessionRules();
   let ruleId = Math.floor(Math.random() * 1000000000) + 1;
@@ -209,9 +212,14 @@ async function browserFile(url, filename, askSave) {
     }],
   });
   try {
+    checkSubmission(generation);
     const id = await chrome.downloads.download({ url, filename, saveAs: askSave, conflictAction: "uniquify" });
     const key = "rule_" + id;
     await chrome.storage.session.set({ [key]: ruleId });
+    if (generation !== submissionGeneration) {
+      await chrome.downloads.cancel(id).catch(() => {});
+      checkSubmission(generation);
+    }
     return id;
   } catch (error) {
     await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
@@ -229,21 +237,23 @@ chrome.downloads.onChanged.addListener(async delta => {
   }
 });
 
-async function downloadBrowser(meta, pages, quality, askSave) {
+async function downloadBrowser(meta, pages, quality, askSave, generation) {
   const ids = [];
   for (const page of pages) {
+    checkSubmission(generation);
     const data = await playback(meta, page, quality);
+    checkSubmission(generation);
     const part = meta.pages.find(p => p.page === page);
     const base = safeName(meta.title, 60) + " [" + meta.bvid + "]" + (meta.pages.length > 1 ? " P" + String(page).padStart(2, "0") + " " + safeName(part.part, 35) : "");
     if (data.dash?.video?.length) {
       const video = chooseVideo(data.dash.video, quality);
       const audio = [...(data.dash.audio || [])].sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
       if (!audio) throw new Error("没有可用的音频轨道。");
-      ids.push(await browserFile(mediaUrl(video), "B站视频/" + base + "_video.m4s", askSave));
-      ids.push(await browserFile(mediaUrl(audio), "B站视频/" + base + "_audio.m4s", askSave));
+      ids.push(await browserFile(mediaUrl(video), "B站视频/" + base + "_video.m4s", askSave, generation));
+      ids.push(await browserFile(mediaUrl(audio), "B站视频/" + base + "_audio.m4s", askSave, generation));
     } else {
       for (const [i, segment] of (data.durl || []).entries()) {
-        ids.push(await browserFile(mediaUrl(segment), "B站视频/" + base + (data.durl.length > 1 ? "_片段" + (i + 1) : "") + ".flv", askSave));
+        ids.push(await browserFile(mediaUrl(segment), "B站视频/" + base + (data.durl.length > 1 ? "_片段" + (i + 1) : "") + ".flv", askSave, generation));
       }
     }
   }
@@ -283,23 +293,43 @@ async function danmakuReference(url, sender) {
   return reference;
 }
 
-async function submitTasks(tasks) {
+async function submitTasks(tasks, generation = submissionGeneration) {
   if (!tasks.length) throw new Error("请至少勾选一个视频或分P。");
+  checkSubmission(generation);
+  const info = await localRequest("/status");
+  checkSubmission(generation);
   if (tasks.some(task => task.danmaku?.enabled)) {
-    const info = await localRequest("/status");
     if (!info.capabilities?.includes("danmaku")) throw new Error("当前桌面端不支持弹幕版，请退出旧程序并打开1.5.0或更新版本。");
   }
   const login = await cookies();
+  checkSubmission(generation);
   let added = 0;
   for (let start = 0; start < tasks.length; start += 100) {
     try {
-      const result = await localRequest("/tasks", { tasks: tasks.slice(start, start + 100), cookies: login });
+      checkSubmission(generation);
+      const result = await localRequest("/tasks", { tasks: tasks.slice(start, start + 100), cookies: login, cancel_generation: info.cancel_generation });
       added += result.added;
     } catch (error) {
       throw new Error((start ? "已有 " + added + " 个任务入队，后续批次已停止。" : "") + error.message + " 请先检查桌面队列；重复操作会跳过相同任务。");
     }
   }
   return added;
+}
+
+async function cancelAllDownloads() {
+  submissionGeneration++;
+  const stored = await chrome.storage.session.get(null);
+  const ids = Object.keys(stored).filter(key => /^rule_\d+$/.test(key)).map(key => Number(key.slice(5)));
+  let browserCount = 0, desktopCount = 0, warning = "";
+  await Promise.all(ids.map(async id => { try { await chrome.downloads.cancel(id); browserCount++; } catch {} }));
+  try {
+    const config = await settings();
+    if (config.token && await desktopHealthy()) {
+      const result = await localRequest("/tasks/cancel-all", {}, 12000, { wake: false });
+      desktopCount = result.cancelled;
+    }
+  } catch (error) { warning = " 桌面任务未取消：" + (error.message.includes("没有这个接口") ? "请升级桌面程序到1.5.2或更新版本。" : error.message); }
+  return { warning: Boolean(warning), message: "已请求取消 " + desktopCount + " 个桌面任务、" + browserCount + " 个本扩展浏览器下载；已完成文件保留。" + warning };
 }
 
 async function handle(request, sender) {
@@ -318,6 +348,7 @@ async function handle(request, sender) {
     case "videoParts": return metadata(request.url);
     case "danmakuReference": return danmakuReference(request.url, sender);
     case "status": return localRequest("/status");
+    case "cancelAllDownloads": return cancelAllDownloads();
     case "directory": {
       const result = await localRequest("/status", undefined, 1800, { wake: false });
       return { directory: result.directory };
@@ -361,17 +392,19 @@ async function handle(request, sender) {
       throw new Error("选择目录超时，请重试。");
     }
     case "download": {
+      const generation = submissionGeneration;
       const meta = await metadata(request.url);
+      checkSubmission(generation);
       const pages = [...new Set((request.pages || [meta.page]).map(Number))];
       if (!pages.length || pages.length > 500 || pages.some(page => !meta.pages.some(p => p.page === page))) throw new Error("请选择有效分P。");
       const config = await settings();
       const danmaku = normalizeProfile(request.danmaku || {});
       if (request.mode === "browser") {
         if (danmaku.enabled) throw new Error("弹幕版需要选择“桌面合并MP4”模式。");
-        return downloadBrowser(meta, pages, Number(request.quality) || 0, config.askSave);
+        return downloadBrowser(meta, pages, Number(request.quality) || 0, config.askSave, generation);
       }
       if (danmaku.enabled && [125, 126].includes(Number(request.quality))) throw new Error("弹幕版暂不支持HDR和杜比视界，请选择普通SDR画质。");
-      const added = await submitTasks(pages.map(page => ({ url: meta.url, title: meta.title, page, quality: Number(request.quality) || 0, danmaku })));
+      const added = await submitTasks(pages.map(page => ({ url: meta.url, title: meta.title, page, quality: Number(request.quality) || 0, danmaku })), generation);
       return { message: "已加入 " + added + " 个本地任务。设置已固定，可以关闭扩展窗口。" };
     }
     case "folders": {

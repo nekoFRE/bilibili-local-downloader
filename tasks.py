@@ -115,6 +115,7 @@ class TaskManager:
         self.wakeup = threading.Event()
         self.closed = threading.Event()
         self.cancel = threading.Event()
+        self.cancel_generation = 0
         self.paused = False
         self.active_id = None
         self.cookies = settings.cookies()
@@ -146,11 +147,13 @@ class TaskManager:
         with self.lock:
             return copy.deepcopy(self.tasks)
 
-    def add(self, specs, cookies=None):
+    def add(self, specs, cookies=None, cancel_generation=None):
         if not specs or len(specs) > 500:
             raise ValueError("一次请添加1到500个任务。")
         added = []
         with self.lock:
+            if cancel_generation is not None and (type(cancel_generation) is not int or cancel_generation != self.cancel_generation):
+                raise ValueError("这批任务已取消，请重新选择后再加入队列。")
             prepared = []
             for spec in specs:
                 bv, url_page, url = normalize_input(spec["url"])
@@ -221,6 +224,20 @@ class TaskManager:
                 self._save()
         self.wakeup.set()
 
+    def cancel_all(self):
+        with self.lock:
+            self.cancel_generation += 1
+            pending = [task for task in self.tasks if task["status"] not in FINISHED]
+            for task in pending:
+                if task["id"] == self.active_id:
+                    self.cancel.set()
+                    task["detail"] = "正在取消，等待当前操作结束并清理临时文件…"
+                else:
+                    task.update(status="已取消", detail="已全部取消")
+                    self.task_cookies.pop(task["id"], None)
+            self._save()
+            return len(pending)
+
     def clear_finished(self):
         with self.lock:
             self.tasks = [t for t in self.tasks if t["status"] not in FINISHED]
@@ -247,8 +264,13 @@ class TaskManager:
                     meta = video_metadata(task["url"], cookies)
                     extras = [{"url": task["url"], "page": p["page"], "directory": task["directory"], "quality": task["quality"], "title": meta["title"], "danmaku": task.get("danmaku")} for p in meta["pages"] if p["page"] != task["page"]]
                     for start in range(0, len(extras), 100):
-                        self.add(extras[start:start + 100], cookies)
+                        with self.lock:
+                            if self.cancel.is_set():
+                                raise Cancelled("已取消")
+                            self.add(extras[start:start + 100], cookies)
                     task["all_pages"] = False
+                if self.cancel.is_set():
+                    raise Cancelled("已取消")
                 result = self.download_function(task, cookies, notify, self.cancel)
                 with self.lock:
                     task.update(status="已完成", progress=100, detail=result.pop("summary", "下载完成"), **result)
@@ -263,7 +285,7 @@ class TaskManager:
                     for value in cookies.values():
                         if len(str(value)) > 4:
                             message = message.replace(str(value), "[已隐藏]")
-                    task.update(status="失败", detail=message[:900])
+                    task.update(status="已取消" if self.cancel.is_set() else "失败", detail="已取消，临时文件已清理" if self.cancel.is_set() else message[:900])
             finally:
                 with self.lock:
                     self.active_id = None
@@ -329,10 +351,12 @@ class Bridge:
 
             def do_GET(self):
                 if self.path == "/health" and self.valid_host() and self.allowed_origin():
-                    self.reply(200, {"app": "bili-local-downloader", "version": "1.5.1"})
+                    self.reply(200, {"app": "bili-local-downloader", "version": "1.5.2"})
                 elif self.authenticate():
                     if self.path == "/status":
-                        self.reply(200, {"version": "1.5.1", "capabilities": ["danmaku"], "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
+                        with bridge.manager.lock:
+                            status = {"version": "1.5.2", "capabilities": ["danmaku", "cancel-all"], "cancel_generation": bridge.manager.cancel_generation, "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]}
+                        self.reply(200, status)
                     elif self.path == "/danmaku-settings":
                         self.reply(200, {"reference": bridge.manager.danmaku_reference})
                     elif urlparse(self.path).path == "/directory-result":
@@ -361,8 +385,10 @@ class Bridge:
                         raise ValueError("请求格式不正确")
                     if self.path == "/tasks":
                         cookies = checked_cookies(body.get("cookies") or {})
-                        ids = bridge.manager.add(body.get("tasks") or [], cookies)
+                        ids = bridge.manager.add(body.get("tasks") or [], cookies, body.get("cancel_generation"))
                         self.reply(200, {"added": len(ids), "ids": ids})
+                    elif self.path == "/tasks/cancel-all":
+                        self.reply(200, {"cancelled": bridge.manager.cancel_all()})
                     elif self.path == "/danmaku-settings":
                         reference = bridge.manager.set_danmaku_reference(body.get("reference"))
                         self.reply(200, {"reference": reference})

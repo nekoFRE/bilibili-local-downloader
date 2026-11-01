@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -72,9 +73,17 @@ def favorite_part_text(video, selected):
         return "已失效"
     if video.get("page_count") == 1:
         return "单视频"
-    if selected:
-        return f"已选 {len(selected)}P"
+    if selected is not None:
+        return f"已选 {len(selected)}P" if selected else "未选分P"
     return "选择分P" if video.get("page_count", 0) > 1 else "查看分P"
+
+
+def normalize_part_selections(value):
+    if not isinstance(value, dict):
+        return {}
+    return {bvid: sorted({page for page in pages if type(page) is int and 1 <= page <= 10000})
+            for bvid, pages in list(value.items())[-1000:]
+            if isinstance(bvid, str) and re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid) and isinstance(pages, list)}
 
 
 def card():
@@ -450,7 +459,8 @@ class MainWindow(QMainWindow):
         self.favorites = []
         self.favorite_folder_id = None
         self.favorite_states, self.favorite_nodes = {}, {}
-        self.favorite_selected, self.favorite_parts = set(), {}
+        self.favorite_selected = set()
+        self.favorite_parts = normalize_part_selections(settings.values.get("favorite_parts"))
         self.favorite_next_page, self.favorite_total = 1, 0
         self.favorite_has_more, self.favorite_loading = False, False
         self.favorite_scan, self.favorite_generation = None, 0
@@ -589,6 +599,9 @@ class MainWindow(QMainWindow):
         row.addWidget(self.filter)
         self.pause_button = button("暂停队列", self.toggle_pause)
         row.addWidget(self.pause_button)
+        self.cancel_all_button = button("全部取消", self.cancel_all_downloads)
+        self.cancel_all_button.setToolTip("停止当前下载并取消全部排队任务，已完成的视频保留。")
+        row.addWidget(self.cancel_all_button)
         row.addWidget(button("清除已结束", self.clear_finished))
         queue_layout.addLayout(row)
         self.table = QTableWidget(0, 5)
@@ -602,7 +615,7 @@ class MainWindow(QMainWindow):
             self.table.setColumnWidth(index, width)
         self.table.cellDoubleClicked.connect(self.show_task)
         queue_layout.addWidget(self.table, 1)
-        queue_layout.addWidget(label("双击任务查看详情。暂停队列会等待当前任务完成；取消可停止当前下载。", "muted"))
+        queue_layout.addWidget(label("双击任务查看详情。暂停队列会等待当前任务完成；全部取消会停止当前下载及排队任务，已完成文件保留。", "muted"))
         layout.addWidget(queue_card, 1)
         return widget
 
@@ -959,6 +972,7 @@ class MainWindow(QMainWindow):
             self.restore_window()
         snapshots = self.manager.snapshot()
         counts = sum(t["status"] not in FINISHED for t in snapshots)
+        self.cancel_all_button.setEnabled(bool(counts) or getattr(self, "favorite_submitting", False))
         self.queue_count.setText(f'{counts} 个进行中 · {len(snapshots)} 个任务')
         if self.tray:
             self.tray.setToolTip(f"B站视频下载器 · {counts} 个任务" + (" · 队列已暂停" if self.manager.paused else ""))
@@ -1127,14 +1141,14 @@ class MainWindow(QMainWindow):
 
     def change_favorite_folder(self, *_):
         if self.favorite_folder_id:
-            self.favorite_states[self.favorite_folder_id] = {"items": self.favorites, "selected": set(self.favorite_selected), "parts": dict(self.favorite_parts), "next": self.favorite_next_page, "more": self.favorite_has_more, "total": self.favorite_total, "query": self.favorite_search.text(), "scroll": self.favorite_list.verticalScrollBar().value()}
+            self.favorite_states[self.favorite_folder_id] = {"items": self.favorites, "selected": set(self.favorite_selected), "next": self.favorite_next_page, "more": self.favorite_has_more, "total": self.favorite_total, "query": self.favorite_search.text(), "scroll": self.favorite_list.verticalScrollBar().value()}
         self.favorite_generation += 1
         self.favorite_scan, self.favorite_loading = None, False
         self.favorite_page_error = False
         self.favorite_folder_id = self.folder_combo.currentData()
         state = self.favorite_states.get(self.favorite_folder_id, {})
         self.favorites = state.get("items", [])
-        self.favorite_selected, self.favorite_parts = set(state.get("selected", [])), dict(state.get("parts", {}))
+        self.favorite_selected = set(state.get("selected", []))
         self.favorite_next_page, self.favorite_total = state.get("next", 1), state.get("total", 0)
         self.favorite_has_more = state.get("more", bool(self.favorite_folder_id))
         self.favorite_nodes.clear()
@@ -1372,7 +1386,8 @@ class MainWindow(QMainWindow):
                 if node is not None:
                     node.setData(Qt.ItemDataRole.UserRole, video)
                 if video["page_count"] == 1:
-                    self.favorite_parts.pop(video["bvid"], None)
+                    if video["bvid"] in self.favorite_parts:
+                        self.remember_favorite_parts(video["bvid"], None)
                     self.render_favorites()
                     self.notice.setText("这是单视频，无需选择分P，勾选视频即可下载。")
                     return
@@ -1395,7 +1410,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(all_parts)
         listing = QListWidget()
         layout.addWidget(listing, 1)
-        hint = label("本条视频的分P选择优先于批量“下载全部分P”设置。", "muted")
+        hint = label("首次默认不选，应用后记住本条视频的选择（仅本机）。单条选择优先于批量“下载全部分P”设置。", "muted")
         layout.addWidget(hint)
         all_parts.toggled.connect(lambda checked: self.select_items(listing, checked))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -1405,7 +1420,7 @@ class MainWindow(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
         generation = self.favorite_generation
-        selected = self.favorite_parts.get(video["bvid"], [p["page"] for p in meta["pages"]] if self.favorite_all_pages.isChecked() else [1])
+        selected = self.favorite_parts.get(video["bvid"], [])
         for part in meta["pages"]:
             item = QListWidgetItem(f'P{part["page"]} {part["part"]} · {duration(part["duration"])}')
             item.setData(Qt.ItemDataRole.UserRole, part["page"])
@@ -1415,19 +1430,33 @@ class MainWindow(QMainWindow):
         all_parts.setChecked(all(listing.item(i).checkState() == Qt.CheckState.Checked for i in range(listing.count())))
         if dialog.exec() == QDialog.DialogCode.Accepted and generation == self.favorite_generation:
             selected = [listing.item(i).data(Qt.ItemDataRole.UserRole) for i in range(listing.count()) if listing.item(i).checkState() == Qt.CheckState.Checked]
+            self.remember_favorite_parts(video["bvid"], selected)
             if selected:
-                self.favorite_parts[video["bvid"]] = selected
                 self.favorite_selected.add(video["bvid"])
             else:
-                self.favorite_parts.pop(video["bvid"], None)
                 self.favorite_selected.discard(video["bvid"])
             self.render_favorites()
         dialog.deleteLater()
 
-    def enqueue_specs(self, specs):
+    def remember_favorite_parts(self, bvid, pages):
+        self.favorite_parts.pop(bvid, None)
+        if pages is not None:
+            self.favorite_parts[bvid] = pages
+        while len(self.favorite_parts) > 1000:
+            self.favorite_parts.pop(next(iter(self.favorite_parts)))
+        self.settings.set("favorite_parts", dict(self.favorite_parts))
+
+    def cancel_all_downloads(self):
+        count = self.manager.cancel_all()
+        self.notice.setText(f"已请求取消全部 {count} 个未结束任务，正在清理当前临时文件；已完成的视频保留。" if count else "当前没有未结束的下载，已停止继续提交本批任务。")
+        self.refresh()
+
+    def enqueue_specs(self, specs, cancel_generation=None):
+        if cancel_generation is None:
+            cancel_generation = self.manager.cancel_generation
         ids = []
         for start in range(0, len(specs), 100):
-            ids.extend(self.manager.add(specs[start:start + 100]))
+            ids.extend(self.manager.add(specs[start:start + 100], cancel_generation=cancel_generation))
         return ids
 
     def add_favorites(self):
@@ -1442,12 +1471,16 @@ class MainWindow(QMainWindow):
         for video in self.favorites:
             if video["bvid"] not in self.favorite_selected or not video["available"]:
                 continue
-            pages = self.favorite_parts.get(video["bvid"])
+            pages = self.favorite_parts.get(video["bvid"]) if video.get("page_count") != 1 else None
+            if pages == []:
+                self.notice.setText(f'“{video["title"][:50]}”尚未选择分P，请先选择需要的内容。')
+                return
             for page in pages or [1]:
                 specs.append({"url": video["bvid"], "page": page, "title": video["title"], "directory": self.directory.text(), "quality": quality, "all_pages": not pages and self.favorite_all_pages.isChecked(), "danmaku": profile})
         if not specs:
             return
         self.favorite_submitting = True
+        cancel_generation = self.manager.cancel_generation
         self.update_favorite_count()
         def success(ids):
             self.favorite_submitting = False
@@ -1458,7 +1491,7 @@ class MainWindow(QMainWindow):
             self.favorite_submitting = False
             self.update_favorite_count()
             self.notice.setText("部分任务可能已入队，请先查看下载队列。" + message)
-        self.async_job(lambda: self.enqueue_specs(specs), success, error)
+        self.async_job(lambda: self.enqueue_specs(specs, cancel_generation), success, error)
 
     def setup_tray(self):
         self.tray = None

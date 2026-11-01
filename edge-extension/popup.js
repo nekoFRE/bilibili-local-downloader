@@ -94,6 +94,11 @@ $("refresh").addEventListener("click", () => busy("refresh", async () => {
   const active = result.tasks.filter(task => !["已完成", "已跳过", "失败", "已取消", "已中断"].includes(task.status)).length;
   status("本机已连接 · " + active + " 个进行中的任务");
 }));
+$("cancel-all-downloads").addEventListener("click", () => busy("cancel-all-downloads", async () => {
+  status("正在取消本工具的未完成下载…");
+  const result = await send({ action: "cancelAllDownloads", mode: mode() });
+  status(result.message, result.warning);
+}));
 $("options").addEventListener("click", () => chrome.runtime.openOptionsPage());
 $("open-desktop").addEventListener("click", () => busy("open-desktop", async () => {
   status("正在唤醒并打开桌面端，请稍候…");

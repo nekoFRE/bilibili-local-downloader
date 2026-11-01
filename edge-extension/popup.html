@@ -29,10 +29,10 @@
    <button id="favorite-download" class="primary favorite-submit" disabled>加入下载队列（0）</button>
  </section>
   <p id="status" role="status">准备好了。</p>
-  <div class="row global-actions"><button id="open-desktop" class="light">打开桌面端</button><button id="sync-login" class="light">同步Edge登录到桌面</button></div>
+  <div class="row global-actions"><button id="open-desktop" class="light">打开桌面端</button><button id="sync-login" class="light">同步Edge登录到桌面</button><button id="cancel-all-downloads" class="light" title="取消本工具全部未完成下载，已完成文件保留">全部取消</button></div>
   <footer><button id="refresh" class="light">检查本机连接</button><button id="floating" class="light">在视频页悬浮</button><button id="expand" class="light">独立页面</button></footer>
 </main>
-<dialog id="favorite-parts-dialog" class="parts-dialog" aria-label="选择视频分P"><h2 id="favorite-parts-title"></h2><label class="check"><input id="favorite-parts-all" type="checkbox">全选分P</label><div id="favorite-parts-list"></div><div class="row"><button id="favorite-parts-cancel">取消</button><button id="favorite-parts-apply" class="primary">应用选择</button></div></dialog>
+<dialog id="favorite-parts-dialog" class="parts-dialog" aria-label="选择视频分P"><h2 id="favorite-parts-title"></h2><p class="hint">首次默认不选，应用后记住本条视频的选择（仅本机）。</p><label class="check"><input id="favorite-parts-all" type="checkbox">全选分P</label><div id="favorite-parts-list"></div><div class="row"><button id="favorite-parts-cancel">取消</button><button id="favorite-parts-apply" class="primary">应用选择</button></div></dialog>
 <script src="popup.js" type="module"></script>
 <script src="directory.js"></script>
 </body></html>

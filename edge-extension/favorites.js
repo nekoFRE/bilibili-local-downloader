@@ -2,13 +2,19 @@ const $ = id => document.getElementById(id);
 const duration = seconds => Math.floor((seconds || 0) / 60) + ":" + String((seconds || 0) % 60).padStart(2, "0");
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const emptyState = () => ({ items: [], selected: [], parts: {}, nextPage: 1, hasMore: true, total: 0, query: "", scroll: 0 });
+const normalizeParts = value => Object.fromEntries(Object.entries(value && typeof value === "object" && !Array.isArray(value) ? value : {}).slice(-1000).filter(([bvid, pages]) => /^BV[0-9A-Za-z]{10}$/.test(bvid) && Array.isArray(pages)).map(([bvid, pages]) => [bvid, [...new Set(pages.filter(page => Number.isInteger(page) && page >= 1 && page <= 10000))].sort((a, b) => a - b)]));
 
 export class FavoriteBrowser {
   constructor(send, report, danmaku) {
     this.send = send; this.report = report; this.danmaku = danmaku; this.folders = []; this.folderId = ""; this.state = emptyState(); this.states = new Map(); this.nodes = new Map(); this.generation = 0; this.scanMode = null;
     this.viewMode = "card";
+    this.partSelections = {}; this.state.parts = this.partSelections;
     document.querySelectorAll("[data-favorite-view]").forEach(button => button.addEventListener("click", () => this.setViewMode(button.dataset.favoriteView)));
-    chrome.storage.onChanged.addListener((changes, area) => { if (area === "local" && changes.favoriteView) this.setViewMode(changes.favoriteView.newValue, false); });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local") return;
+      if (changes.favoriteView) this.setViewMode(changes.favoriteView.newValue, false);
+      if (changes.favoritePartSelections) { this.replaceParts(changes.favoritePartSelections.newValue); this.render(); }
+    });
     this.images = new IntersectionObserver(entries => entries.forEach(entry => { if (entry.isIntersecting) { const image = entry.target; if (image.dataset.src) { image.src = image.dataset.src; delete image.dataset.src; } this.images.unobserve(image); } }), { root: $("favorite-scroll"), rootMargin: "220px" });
     this.sentinel = new IntersectionObserver(([entry]) => { if (entry.isIntersecting) this.maybeMore(); }, { root: $("favorite-scroll"), rootMargin: "140px" });
     this.sentinel.observe($("favorite-sentinel"));
@@ -29,18 +35,32 @@ export class FavoriteBrowser {
     this.partsDialog = $("favorite-parts-dialog");
     $("favorite-parts-cancel").addEventListener("click", () => this.partsDialog.close());
     $("favorite-parts-all").addEventListener("change", event => this.partsDialog.querySelectorAll(".part input").forEach(input => { input.checked = event.target.checked; }));
-    $("favorite-parts-apply").addEventListener("click", () => this.applyParts());
+    $("favorite-parts-apply").addEventListener("click", () => this.applyParts().catch(error => this.report("分P偏好保存失败：" + error.message, true)));
   }
   async init() {
-    const config = await chrome.storage.local.get({ favoriteView: "card" });
+    const config = await chrome.storage.local.get({ favoriteView: "card", favoritePartSelections: {} });
     this.setViewMode(config.favoriteView, false);
     const stored = (await chrome.storage.session.get("favoriteBrowser")).favoriteBrowser;
+    this.replaceParts({ ...normalizeParts(stored?.state?.parts), ...normalizeParts(config.favoritePartSelections) });
     if (stored?.version === 1 && Array.isArray(stored.state?.items)) {
       this.folders = stored.folders || []; this.folderId = String(stored.folderId || ""); this.state = { ...emptyState(), ...stored.state };
+      this.state.parts = this.partSelections;
       this.state.selected = this.state.selected.filter(id => this.state.items.some(item => item.bvid === id && item.available));
       this.populateFolders(); this.render();
       if (stored.open) await this.open();
     }
+  }
+  replaceParts(value) {
+    const parts = normalizeParts(value);
+    for (const key of Object.keys(this.partSelections)) delete this.partSelections[key];
+    Object.assign(this.partSelections, parts);
+  }
+  async rememberParts(bvid, pages) {
+    const parts = { ...this.partSelections };
+    delete parts[bvid];
+    if (pages !== null) parts[bvid] = pages;
+    this.replaceParts(parts);
+    await chrome.storage.local.set({ favoritePartSelections: this.partSelections });
   }
   setViewMode(mode, persist = true) {
     mode = mode === "list" ? "list" : "card";
@@ -86,6 +106,7 @@ export class FavoriteBrowser {
   switchFolder(id) {
     if (this.folderId) this.states.set(this.folderId, this.state);
     this.generation++; this.scanMode = null; this.loading = false; this.pageError = false; this.folderId = String(id); this.state = this.states.get(this.folderId) || emptyState();
+    this.state.parts = this.partSelections;
     if (this.partsDialog.open) this.partsDialog.close();
     this.nodes.clear(); this.images.disconnect(); $("favorite-list").replaceChildren(); $("favorite-search").value = this.state.query;
     this.render(); $("favorite-scroll").scrollTop = this.state.scroll || 0; this.save();
@@ -149,7 +170,7 @@ export class FavoriteBrowser {
       if (!node) { node = this.card(item); this.nodes.set(item.key, node); $("favorite-list").append(node); }
       node.hidden = !visible.has(item.key); node.classList.toggle("selected", this.state.selected.includes(item.bvid)); node.querySelector("input").checked = this.state.selected.includes(item.bvid);
       const pages = this.state.parts[item.bvid], parts = node.querySelector(".favorite-parts"), single = item.page_count === 1;
-      parts.textContent = !item.available ? "已失效" : single ? "单视频" : pages?.length ? "已选 " + pages.length + "P" : item.page_count > 1 ? "选择分P" : "查看分P";
+      parts.textContent = !item.available ? "已失效" : single ? "单视频" : Array.isArray(pages) ? pages.length ? "已选 " + pages.length + "P" : "未选分P" : item.page_count > 1 ? "选择分P" : "查看分P";
       parts.disabled = !item.available || single;
       parts.title = !item.available ? "视频已失效" : single ? "单视频，直接勾选即可下载" : item.page_count > 1 ? "共 " + item.page_count + " 个分P" : "读取后检查是否有多个分P";
     }
@@ -188,7 +209,8 @@ export class FavoriteBrowser {
       const meta = await this.send({ action: "videoParts", url: item.bvid });
       if (this.partsItem !== item || generation !== this.generation) return;
       item.page_count = meta.pages.length;
-      if (item.page_count === 1) delete this.state.parts[item.bvid];
+      if (item.page_count === 1 && Object.hasOwn(this.partSelections, item.bvid)) await this.rememberParts(item.bvid, null);
+      if (this.partsItem !== item || generation !== this.generation) return;
       this.render(); this.save();
       if (item.page_count <= 1) {
         this.report(item.page_count === 1 ? "这是单视频，无需选择分P，勾选视频即可下载。" : "未读取到可用的视频内容，请稍后重试。", item.page_count === 0);
@@ -196,7 +218,7 @@ export class FavoriteBrowser {
       }
       $("favorite-parts-title").textContent = item.title;
       $("favorite-parts-list").replaceChildren();
-      const selected = this.state.parts[item.bvid] || ($("favorite-all-pages").checked ? meta.pages.map(part => part.page) : [1]);
+      const selected = this.state.parts[item.bvid] || [];
       for (const part of meta.pages) { const label = document.createElement("label"); label.className = "part"; const input = document.createElement("input"); input.type = "checkbox"; input.value = part.page; input.checked = selected.includes(part.page); const text = document.createElement("span"); text.textContent = "P" + part.page + " " + part.part + " · " + duration(part.duration); label.append(input, text); $("favorite-parts-list").append(label); }
       $("favorite-parts-apply").disabled = false;
       $("favorite-parts-all").checked = meta.pages.every(part => selected.includes(part.page));
@@ -204,17 +226,24 @@ export class FavoriteBrowser {
     } catch (error) { if (this.partsItem === item && generation === this.generation) this.report(error.message, true); }
     finally { if (this.partsItem === item && this.partsGeneration === generation) this.partsLoading = false; }
   }
-  applyParts() {
+  async applyParts() {
     if (this.partsGeneration !== this.generation || !this.partsItem) return;
-    const bvid = this.partsItem.bvid, pages = [...$("favorite-parts-list").querySelectorAll("input:checked")].map(input => Number(input.value));
-    if (pages.length) { this.state.parts[bvid] = pages; this.state.selected = [...new Set([...this.state.selected, bvid])]; }
-    else { delete this.state.parts[bvid]; this.state.selected = this.state.selected.filter(id => id !== bvid); }
+    const bvid = this.partsItem.bvid, generation = this.generation, pages = [...$("favorite-parts-list").querySelectorAll("input:checked")].map(input => Number(input.value));
+    $("favorite-parts-apply").disabled = true;
+    try { await this.rememberParts(bvid, pages); }
+    finally { $("favorite-parts-apply").disabled = false; }
+    if (generation !== this.generation || this.partsItem.bvid !== bvid) return;
+    if (pages.length) this.state.selected = [...new Set([...this.state.selected, bvid])];
+    else this.state.selected = this.state.selected.filter(id => id !== bvid);
     this.partsDialog.close(); this.render(); this.save();
   }
   async download() {
     if (!this.state.selected.length || this.submitting) return;
     const selected = new Set(this.state.selected), parts = structuredClone(this.state.parts);
-    const items = this.state.items.filter(item => item.available && selected.has(item.bvid)).map(item => ({ bvid: item.bvid, title: item.title, ...(parts[item.bvid]?.length ? { pages: parts[item.bvid] } : {}) }));
+    const chosen = this.state.items.filter(item => item.available && selected.has(item.bvid));
+    const empty = chosen.find(item => item.page_count !== 1 && Array.isArray(parts[item.bvid]) && !parts[item.bvid].length);
+    if (empty) { this.report("“" + empty.title + "”尚未选择分P，请先选择需要的内容。", true); return; }
+    const items = chosen.map(item => ({ bvid: item.bvid, title: item.title, ...(item.page_count !== 1 && parts[item.bvid]?.length ? { pages: parts[item.bvid] } : {}) }));
     const allPages = $("favorite-all-pages").checked, quality = Number($("favorite-quality").value);
     this.submitting = true; this.renderCount();
     try {
