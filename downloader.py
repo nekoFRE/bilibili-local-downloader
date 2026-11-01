@@ -207,7 +207,9 @@ def favorite_page(folder_id, cookies, page=1):
     for item in data.get("medias") or []:
         bvid, title = item.get("bvid", ""), item.get("title", "")
         available = bool(re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid)) and title not in {"已失效视频", "失效视频", "视频已失效"}
-        items.append({"key": bvid or str(item.get("id", "")), "bvid": bvid, "title": title or "不可用视频", "author": item.get("upper", {}).get("name", ""), "duration": item.get("duration", 0), "cover": item.get("cover", ""), "available": available})
+        count = item.get("page")
+        page_count = count if type(count) is int and count > 0 else 0
+        items.append({"key": bvid or str(item.get("id", "")), "bvid": bvid, "title": title or "不可用视频", "author": item.get("upper", {}).get("name", ""), "duration": item.get("duration", 0), "cover": item.get("cover", ""), "available": available, "page_count": page_count})
     return {"items": items, "page": page, "has_more": bool(data.get("has_more") and items), "total": int(data.get("info", {}).get("media_count") or 0)}
 
 

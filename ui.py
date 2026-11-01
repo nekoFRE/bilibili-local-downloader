@@ -67,6 +67,16 @@ def duration(seconds):
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+def favorite_part_text(video, selected):
+    if not video["available"]:
+        return "已失效"
+    if video.get("page_count") == 1:
+        return "单视频"
+    if selected:
+        return f"已选 {len(selected)}P"
+    return "选择分P" if video.get("page_count", 0) > 1 else "查看分P"
+
+
 def card():
     widget = QFrame()
     widget.setObjectName("card")
@@ -374,8 +384,8 @@ class FavoriteDelegate(QStyledItemDelegate):
         painter.setPen(QColor("#7b879b"))
         painter.drawText(QRect(r.x() + 9, r.bottom() - 25, r.width() - 90, 19), Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(video.get("author") or video.get("bvid", ""), Qt.TextElideMode.ElideRight, max(0, r.width() - 90)))
         pages = self.owner.favorite_parts.get(video.get("bvid"))
-        text = f"已选 {len(pages)}P" if pages else "选择分P" if video["available"] else "已失效"
-        painter.setPen(QColor("#0086b0" if video["available"] else "#8998ac"))
+        text = favorite_part_text(video, pages)
+        painter.setPen(QColor("#0086b0" if video["available"] and video.get("page_count") != 1 else "#8998ac"))
         painter.drawText(QRect(r.right() - 78, r.bottom() - 25, 70, 19), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, text)
         painter.restore()
 
@@ -410,9 +420,9 @@ class FavoriteDelegate(QStyledItemDelegate):
         meta = (video.get("author") or "") + " · " + video.get("bvid", "")
         painter.drawText(QRect(left, r.y() + 24, room, 17), Qt.AlignmentFlag.AlignVCenter, painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, room))
         painter.drawText(QRect(r.right() - 145, r.y(), 58, r.height()), Qt.AlignmentFlag.AlignCenter, duration(video.get("duration")))
-        painter.setPen(QColor("#0086b0" if video["available"] else "#8998ac"))
+        painter.setPen(QColor("#0086b0" if video["available"] and video.get("page_count") != 1 else "#8998ac"))
         pages = self.owner.favorite_parts.get(video.get("bvid"))
-        text = f"已选 {len(pages)}P" if pages else "选择分P" if video["available"] else "已失效"
+        text = favorite_part_text(video, pages)
         painter.drawText(QRect(r.right() - 80, r.y(), 70, r.height()), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, text)
         painter.restore()
 
@@ -422,7 +432,7 @@ class FavoriteDelegate(QStyledItemDelegate):
             return False
         click = event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton
         key = event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Space
-        if click and event.position().x() > option.rect.right() - 88 and event.position().y() > option.rect.bottom() - 35:
+        if click and video.get("page_count") != 1 and event.position().x() > option.rect.right() - 88 and event.position().y() > option.rect.bottom() - 35:
             self.owner.open_favorite_parts(video)
             return True
         if click or key:
@@ -1329,7 +1339,8 @@ class MainWindow(QMainWindow):
         video = item.data(Qt.ItemDataRole.UserRole)
         menu = QMenu(self)
         if video["available"]:
-            menu.addAction("选择分P", lambda: self.open_favorite_parts(video))
+            if video.get("page_count") != 1:
+                menu.addAction(favorite_part_text(video, None), lambda: self.open_favorite_parts(video))
             menu.addAction("在B站打开", lambda: QDesktopServices.openUrl(QUrl(f'https://www.bilibili.com/video/{video["bvid"]}/')))
         if video.get("thumbnail"):
             def retry():
@@ -1339,8 +1350,41 @@ class MainWindow(QMainWindow):
             menu.addAction("重试封面", retry)
         menu.exec(self.favorite_list.mapToGlobal(point))
 
-    def open_favorite_parts(self, video):
-        if not video["available"]:
+    def open_favorite_parts(self, video, meta=None):
+        if not video["available"] or video.get("page_count") == 1:
+            return
+        if meta is None:
+            generation = self.favorite_generation
+            pending = getattr(self, "favorite_part_pending", set())
+            self.favorite_part_pending = pending
+            request = (generation, video["bvid"])
+            if request in pending:
+                return
+            pending.add(request)
+            self.notice.setText("正在读取视频分P…")
+            cookies = dict(self.manager.cookies)
+            def success(result):
+                pending.discard(request)
+                if generation != self.favorite_generation:
+                    return
+                video["page_count"] = len(result["pages"])
+                node = self.favorite_nodes.get(video["key"])
+                if node is not None:
+                    node.setData(Qt.ItemDataRole.UserRole, video)
+                if video["page_count"] == 1:
+                    self.favorite_parts.pop(video["bvid"], None)
+                    self.render_favorites()
+                    self.notice.setText("这是单视频，无需选择分P，勾选视频即可下载。")
+                    return
+                if not video["page_count"]:
+                    self.notice.setText("未读取到可用的视频内容，请稍后重试。")
+                    return
+                self.open_favorite_parts(video, result)
+            def error(message):
+                pending.discard(request)
+                if generation == self.favorite_generation:
+                    self.notice.setText(message)
+            self.async_job(lambda: video_metadata(video["bvid"], cookies), success, error)
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("选择视频分P")
@@ -1351,36 +1395,24 @@ class MainWindow(QMainWindow):
         layout.addWidget(all_parts)
         listing = QListWidget()
         layout.addWidget(listing, 1)
-        hint = label("正在读取分P…", "muted")
+        hint = label("本条视频的分P选择优先于批量“下载全部分P”设置。", "muted")
         layout.addWidget(hint)
         all_parts.toggled.connect(lambda checked: self.select_items(listing, checked))
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("应用选择")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
-        closed = threading.Event()
-        dialog.finished.connect(lambda _: closed.set())
         generation = self.favorite_generation
-        cookies = dict(self.manager.cookies)
-        def success(meta):
-            if closed.is_set() or generation != self.favorite_generation:
-                return
-            selected = self.favorite_parts.get(video["bvid"], [p["page"] for p in meta["pages"]] if self.favorite_all_pages.isChecked() else [1])
-            for part in meta["pages"]:
-                item = QListWidgetItem(f'P{part["page"]} {part["part"]} · {duration(part["duration"])}')
-                item.setData(Qt.ItemDataRole.UserRole, part["page"])
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(Qt.CheckState.Checked if part["page"] in selected else Qt.CheckState.Unchecked)
-                listing.addItem(item)
-            hint.setText("本条视频的分P选择优先于批量“下载全部分P”设置。")
-            buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
-        def error(message):
-            if not closed.is_set():
-                hint.setText(message)
-        self.async_job(lambda: video_metadata(video["bvid"], cookies), success, error)
+        selected = self.favorite_parts.get(video["bvid"], [p["page"] for p in meta["pages"]] if self.favorite_all_pages.isChecked() else [1])
+        for part in meta["pages"]:
+            item = QListWidgetItem(f'P{part["page"]} {part["part"]} · {duration(part["duration"])}')
+            item.setData(Qt.ItemDataRole.UserRole, part["page"])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if part["page"] in selected else Qt.CheckState.Unchecked)
+            listing.addItem(item)
+        all_parts.setChecked(all(listing.item(i).checkState() == Qt.CheckState.Checked for i in range(listing.count())))
         if dialog.exec() == QDialog.DialogCode.Accepted and generation == self.favorite_generation:
             selected = [listing.item(i).data(Qt.ItemDataRole.UserRole) for i in range(listing.count()) if listing.item(i).checkState() == Qt.CheckState.Checked]
             if selected:

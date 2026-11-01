@@ -148,7 +148,10 @@ export class FavoriteBrowser {
       let node = this.nodes.get(item.key);
       if (!node) { node = this.card(item); this.nodes.set(item.key, node); $("favorite-list").append(node); }
       node.hidden = !visible.has(item.key); node.classList.toggle("selected", this.state.selected.includes(item.bvid)); node.querySelector("input").checked = this.state.selected.includes(item.bvid);
-      const pages = this.state.parts[item.bvid]; node.querySelector(".favorite-parts").textContent = item.available ? pages?.length ? "已选 " + pages.length + "P" : "选择分P" : "已失效";
+      const pages = this.state.parts[item.bvid], parts = node.querySelector(".favorite-parts"), single = item.page_count === 1;
+      parts.textContent = !item.available ? "已失效" : single ? "单视频" : pages?.length ? "已选 " + pages.length + "P" : item.page_count > 1 ? "选择分P" : "查看分P";
+      parts.disabled = !item.available || single;
+      parts.title = !item.available ? "视频已失效" : single ? "单视频，直接勾选即可下载" : item.page_count > 1 ? "共 " + item.page_count + " 个分P" : "读取后检查是否有多个分P";
     }
     $("favorite-empty").hidden = visible.size > 0;
     $("favorite-empty").textContent = !this.folderId ? "选择收藏夹后，视频会分批显示在这里。" : this.state.query ? "已加载视频中没有匹配项；可搜索整个收藏夹。" : this.loading ? "正在读取视频…" : "收藏夹暂时没有可显示的视频。";
@@ -177,16 +180,29 @@ export class FavoriteBrowser {
     this.scanMode = null; this.render(); this.save();
   }
   async openParts(item) {
+    if (!item.available || item.page_count === 1 || (this.partsLoading && this.partsItem === item && this.partsGeneration === this.generation)) return;
     this.partsItem = item; this.partsGeneration = this.generation;
-    $("favorite-parts-title").textContent = item.title; $("favorite-parts-list").textContent = "正在读取分P…"; $("favorite-parts-apply").disabled = true; $("favorite-parts-all").checked = false; this.partsDialog.showModal();
+    const generation = this.generation;
+    this.partsLoading = true; this.report("正在读取视频分P…");
     try {
       const meta = await this.send({ action: "videoParts", url: item.bvid });
-      if (!this.partsDialog.open || this.partsItem !== item || this.partsGeneration !== this.generation) return;
+      if (this.partsItem !== item || generation !== this.generation) return;
+      item.page_count = meta.pages.length;
+      if (item.page_count === 1) delete this.state.parts[item.bvid];
+      this.render(); this.save();
+      if (item.page_count <= 1) {
+        this.report(item.page_count === 1 ? "这是单视频，无需选择分P，勾选视频即可下载。" : "未读取到可用的视频内容，请稍后重试。", item.page_count === 0);
+        return;
+      }
+      $("favorite-parts-title").textContent = item.title;
       $("favorite-parts-list").replaceChildren();
-      const selected = this.state.parts[item.bvid] || meta.pages.map(part => part.page);
+      const selected = this.state.parts[item.bvid] || ($("favorite-all-pages").checked ? meta.pages.map(part => part.page) : [1]);
       for (const part of meta.pages) { const label = document.createElement("label"); label.className = "part"; const input = document.createElement("input"); input.type = "checkbox"; input.value = part.page; input.checked = selected.includes(part.page); const text = document.createElement("span"); text.textContent = "P" + part.page + " " + part.part + " · " + duration(part.duration); label.append(input, text); $("favorite-parts-list").append(label); }
       $("favorite-parts-apply").disabled = false;
-    } catch (error) { if (this.partsDialog.open) $("favorite-parts-list").textContent = error.message; }
+      $("favorite-parts-all").checked = meta.pages.every(part => selected.includes(part.page));
+      this.partsDialog.showModal(); this.report("已读取 " + item.page_count + " 个分P，可选择需要的内容。");
+    } catch (error) { if (this.partsItem === item && generation === this.generation) this.report(error.message, true); }
+    finally { if (this.partsItem === item && this.partsGeneration === generation) this.partsLoading = false; }
   }
   applyParts() {
     if (this.partsGeneration !== this.generation || !this.partsItem) return;

@@ -329,10 +329,10 @@ class Bridge:
 
             def do_GET(self):
                 if self.path == "/health" and self.valid_host() and self.allowed_origin():
-                    self.reply(200, {"app": "bili-local-downloader", "version": "1.5.0"})
+                    self.reply(200, {"app": "bili-local-downloader", "version": "1.5.1"})
                 elif self.authenticate():
                     if self.path == "/status":
-                        self.reply(200, {"version": "1.5.0", "capabilities": ["danmaku"], "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
+                        self.reply(200, {"version": "1.5.1", "capabilities": ["danmaku"], "directory": bridge.manager.settings.values["directory"], "tasks": bridge.manager.snapshot()[-100:]})
                     elif self.path == "/danmaku-settings":
                         self.reply(200, {"reference": bridge.manager.danmaku_reference})
                     elif urlparse(self.path).path == "/directory-result":

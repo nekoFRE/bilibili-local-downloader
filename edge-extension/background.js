@@ -255,6 +255,7 @@ async function favoritePage(folderId, page = 1) {
   const data = await biliAPI("/x/v3/fav/resource/list", { media_id: Number(folderId), pn: page, ps: 20 });
   const items = (data.medias || []).map(item => ({
     key: item.bvid || String(item.id), bvid: item.bvid || "", title: item.title || "不可用视频", author: item.upper?.name || "", cover: item.cover || "", duration: item.duration || 0,
+    page_count: Number.isSafeInteger(item.page) && item.page > 0 ? item.page : 0,
     available: /^BV[0-9A-Za-z]{10}$/.test(item.bvid || "") && !["已失效视频", "失效视频", "视频已失效"].includes(item.title),
   }));
   return { items, page, has_more: Boolean(data.has_more && items.length), total: Number(data.info?.media_count || 0) };
